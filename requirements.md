@@ -15,6 +15,15 @@ LINEグループの配車記録を照合し、漏れ・金額相違をチェッ�
 2. 元請えExcelと自動照合し、差分を検出
 3. ドライバー別の支払明細Excelを自動生成
 
+### フェーズごとの提供価値（読み違え防止）
+- **Phase 1（MVP）**: 「**支払明細生成の半自動化**」。F1（LINE蓄積）、F3（Excel取込）、
+  F5（基本CRUD）、F6（支払明細出力）を提供する。
+  **自動照合（F4）はまだ動かない**ため、稼働照合（運送会社の最終ゴール）は
+  Phase 1 完了時点では成立しない点を関係者と合意する。
+- **Phase 2**: F2（Claude Haiku解析）+ F4（自動照合エンジン）を追加し、
+  「稼働照合」を初めて完成させる。
+- **Phase 3**: 照合精度改善、異常検知の高度化、月次レポート自動化。
+
 ### ユーザー
 - 管理者: 1名（STEELO代表）— 照合確認・支払明細作成
 - ドライバー: 約20名 — LINEで報告するだけ（システムは使わない）
@@ -218,28 +227,41 @@ LINE Harnessの既存Next.js管理画面にページを追加。
 
 支払計算ロジック:
 
-前提: 元請えExcelの運賃は税抜金額
+前提:
+- 元請えExcelの運賃は税抜金額
+- 手数料率（commission_rate）と消費税率（tax_rate）は **生成時のスナップショット値**を
+  `driver_payment_summaries.commission_rate_snapshot` / `tax_rate_snapshot` に保存し、
+  税制改正に追従できるようにする（既定は 0.075 / 0.10）
+- 控除（車両代/電算処理費/前払金）は **per-driver per-period** で管理する
+  （`driver_deductions` テーブル）。元請えExcelヘッダーの控除値は会社合計の参照値で、
+  ドライバー個別の控除には使わない（全ドライバーに同じ金額を引かない）
 
-  ① 手数料控除:
-     控除後運賃 = Excel運賃（税抜） × 0.925
+  ① 手数料控除（行単位）:
+     控除後運賃 = Excel運賃（税抜） × (1 - commission_rate_snapshot)
+     例: 0.075 → × 0.925
 
-  ② 消費税（インボイス有無で分岐）:
-     インボイスあり → 運賃（税込） = 控除後運賃 × 1.1
+  ② 消費税（インボイス有無で分岐、行単位）:
+     インボイスあり → 運賃（税込） = 控除後運賃 × (1 + tax_rate_snapshot)
      インボイスなし → 運賃（税込） = 控除後運賃（税抜のまま）
 
-  ③ 端数処理: 四捨五入（円単位）
+  ③ 端数処理: **行単位で `Math.round()` 四捨五入**（合算後丸めではない。
+     `rounding_rule = 'per_line_round'` として永続化）
 
   ④ 立替金: 全額そのまま
 
   ⑤ 最終支払額:
-     お支払い金額合計 = 運賃合計（税込） + 立替合計 - 車両代 - 電算処理費 - 前払金
+     お支払い金額合計 = Σ(行単位の運賃税込) + Σ(立替)
+       - driver_deductions.vehicle_cost
+       - driver_deductions.processing_fee
+       - driver_deductions.prepayment
+     （`driver_deductions` 未登録なら各 0 として計算）
 
-計算例:
+計算例（1行のみ）:
 
   Excel上: 運賃 7,680円（税抜）、立替金 1,040円
 
   インボイスあり:
-    7,680 × 0.925 = 7,104 → × 1.1 = 7,814円（四捨五入）
+    7,680 × 0.925 = 7,104 → × 1.1 = 7,814.4 → 四捨五入 7,814円
     支払 = 7,814 + 1,040 = 8,854円
 
   インボイスなし:
@@ -261,9 +283,16 @@ LINE Harnessの既存Next.js管理画面にページを追加。
 - 他の列はExcelデータをそのまま転記
 - 当該ドライバーの行のみ抽出
 
-出力単位:
-- 1ドライバー1ファイル
-- 一括ダウンロード: 全ドライバー分をZIPで
+出力単位と配信:
+- 個別: 1ドライバー1ファイル（**同期API**、2秒以内目標）
+  → fetch + Blob で DL（Bearer 必須、`<a download>` で API は呼ばない）
+- 一括: 全ドライバー分をZIPで提供。ただし **非同期ジョブ** として
+  処理し、`payment_jobs` を queued → R2 にxlsx/ZIPを保存 → UI で完了確認後に
+  **R2 の短命署名付きURL（15分）** でブラウザが直接DLする
+- 生成済みExcel/ZIPは R2 に保存し、`driver_payment_summaries.r2_xlsx_key` と
+  `payment_jobs.r2_zip_key` から再ダウンロード可能
+- 控除内訳・手数料率・税率・インボイス有無は生成時に
+  `driver_payment_summaries` にスナップショット保存し、後からの再現性を担保
 
 
 ## 5. データモデル
@@ -345,19 +374,62 @@ LINE Harnessの既存Next.js管理画面にページを追加。
 - reviewed_at: TEXT — 確認日時
 - notes: TEXT — 管理者メモ
 
-### driver_payment_summaries（ドライバー支払サマリー）
+### driver_aliases（ドライバー別名マスタ）
 - id: TEXT PK — UUID
-- driver_id: TEXT FK — ドライバーID
+- driver_id: TEXT FK — drivers.id
+- alias_name: TEXT UNIQUE — Excel DR名のゆれ吸収（旧姓・空白・カナ違い等）
+- created_at: TEXT — 作成日時
+
+### driver_deductions（ドライバー月次控除マスタ）
+- id: TEXT PK — UUID
+- driver_id: TEXT FK — drivers.id
 - period: TEXT — 対象月
-- has_invoice: INTEGER — 生成時点のインボイス有無
-- total_fare_before_tax: INTEGER — 運賃合計（税抜・手数料控除後）
-- total_fare_with_tax: INTEGER — 運賃合計（税込）
-- total_advance: INTEGER — 立替金合計
 - vehicle_cost: INTEGER DEFAULT 0 — 車両代(修理代)
 - processing_fee: INTEGER DEFAULT 0 — 電算処理費
 - prepayment: INTEGER DEFAULT 0 — 前払金
+- notes: TEXT — メモ
+- created_at: TEXT、updated_at: TEXT、updated_by: TEXT
+- UNIQUE (driver_id, period)
+
+### driver_payment_summaries（ドライバー支払サマリー / 生成時スナップショット）
+- id: TEXT PK — UUID
+- driver_id: TEXT FK — ドライバーID
+- period: TEXT — 対象月
+- import_batch_id: TEXT FK — 生成元バッチ（必須）
+- payment_job_id: TEXT FK — 一括ジョブ経由なら job id
+- driver_name_snapshot: TEXT — 生成時の氏名
+- has_invoice_snapshot: INTEGER — 生成時点のインボイス有無
+- commission_rate_snapshot: REAL — 生成時の手数料率（例 0.075）
+- tax_rate_snapshot: REAL — 生成時の消費税率（例 0.10）
+- rounding_rule: TEXT — 'per_line_round' を永続化
+- total_fare_before_tax: INTEGER — 運賃合計（税抜・手数料控除後・行単位丸め後）
+- total_fare_with_tax: INTEGER — 運賃合計（税込・行単位丸め後）
+- total_advance: INTEGER — 立替金合計
+- vehicle_cost: INTEGER — driver_deductions の値をスナップショット
+- processing_fee: INTEGER — 同上
+- prepayment: INTEGER — 同上
 - final_amount: INTEGER — お支払い金額合計
+- r2_xlsx_key: TEXT — R2 上の生成済み xlsx
 - generated_at: TEXT — 生成日時
+- UNIQUE (driver_id, period)
+
+### payment_summary_lines（明細行スナップショット）
+- id, summary_id FK, client_record_id FK, work_day, task_name,
+  fare, fare_after_commission, fare_with_tax, advance_payment, excluded_from_calc
+
+### payment_jobs（一括ZIP非同期ジョブ）
+- id, period, status (queued/running/completed/failed), progress, total_drivers, done_drivers,
+  r2_zip_key, error_message, requested_by, requested_at, started_at, completed_at
+- 同一 period の queued/running は generated column + UNIQUE で重複排除
+
+### import_previews（Excelプレビュー索引、本体はR2）
+- preview_id PK, period, file_name, row_count, summary_json, r2_key,
+  created_by, created_at, expires_at（既定 1h）
+
+### audit_logs（監査ログ）
+- id, actor_id, actor_name, action, resource_type, resource_id, payload_json,
+  ip, user_agent, created_at
+- インポート確定/上書き、支払生成、ジョブ投入、マスタ/控除変更、Webhook 保存失敗等を必ず記録
 
 
 ## 6. 業務名マスタ（初期データ / Excel実績から抽出）
@@ -386,12 +458,23 @@ LINE Harnessの既存Next.js管理画面にページを追加。
 
 ## 7. 非機能要件
 
-- 応答性: Webhook受信から解析完了まで30秒以内
+- **応答性**:
+  - Webhook: 200 を 3秒以内に返却（D1 書き込みは waitUntil で非同期完了）
+  - 個別 xlsx 生成（同期API）: 2秒以内
+  - 月次一括生成（payment_jobs 非同期）: 20名分を 5分以内
 - 可用性: Cloudflare Workers 99.9%+
 - データ容量: 月1,000件 × 12ヶ月 × 5年 = 60,000件（D1 500MBで十分）
-- セキュリティ: 管理画面に認証必須（Cloudflare Access推奨）
-- バックアップ: D1 Time Travel（30日間任意時点復元）
-- 端数処理: 全ての金額計算で四捨五入（円単位）
+- **セキュリティ**:
+  - 管理画面と STEELO API は **Cloudflare Access 必須**（推奨ではなく前提）
+  - STEELO API は origin 限定 CORS（環境変数 `STEELO_WEB_ORIGINS`）
+  - 全ての DL は Bearer 付き fetch + Blob か R2 短命署名付き URL（15分）
+  - Excel アップロードは MIME / サイズ（≤10MB）/ シート数（≤5）/ 行数 / セル数 /
+    数式 / 外部リンク / OLE / パスワード保護 で検証
+- バックアップ: D1 Time Travel（30日間任意時点復元）。PII を含むことを運用ドキュメントで明示
+- 端数処理: **行単位**で `Math.round()` 円単位四捨五入（合算後丸めは不可、業務合意済み）
+- 監査: 重要操作は `audit_logs` に永続化、`console.log` だけで終わらせない
+- 冪等性: LINE message_id UNIQUE で Webhook 再送時の重複保存を防ぐ。
+  Excel preview は本番テーブル非書込、確定は generated column + UNIQUE で並行排他
 
 
 ## 8. 初期セットアップ手順
@@ -408,11 +491,14 @@ LINE Harnessの既存Next.js管理画面にページを追加。
 
 ## 9. 開発フェーズ
 
-### Phase 1（MVP）
-- F1: LINEメッセージ受信・蓄積
-- F3: 元請えExcelインポート
-- F5: 管理画面（基本CRUD）
-- F6: ドライバー支払明細Excel出力
+### Phase 1（MVP / 「支払明細生成の半自動化」）
+- F1: LINEメッセージ受信・蓄積（message_id UNIQUE で再送冪等性）
+- F3: 元請えExcelインポート（プレビュー非永続化 + 上限値検証 + ヘッダー名探索 + driver_aliases）
+- F5: 管理画面（ドライバー / ドライバー別名 / 月次控除 / Excelインポート / 配車レコード /
+  支払明細生成 / 監査ログ）。Cloudflare Access 必須
+- F6: ドライバー支払明細Excel出力（個別=同期API、一括=非同期ジョブ + R2 + 署名付きURL、
+  スナップショット永続化）
+- ※「自動照合」はまだ動かない。Phase 2 で完成させる。
 
 ### Phase 2
 - F2: Claude Haiku解析

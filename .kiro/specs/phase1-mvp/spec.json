@@ -1,13 +1,13 @@
 {
   "feature_name": "phase1-mvp",
   "created_at": "2026-05-20T00:00:00+09:00",
-  "updated_at": "2026-05-20T00:00:00+09:00",
+  "updated_at": "2026-05-20T14:00:00+09:00",
   "language": "ja",
   "phase": "design-generated",
   "approvals": {
     "requirements": {
       "generated": true,
-      "approved": true
+      "approved": false
     },
     "design": {
       "generated": true,
@@ -19,5 +19,15 @@
     }
   },
   "ready_for_implementation": false,
-  "description": "STEELO 稼働照合・ドライバー支払明細システムの Phase 1 MVP。F1: LINEメッセージ受信・蓄積、F3: 元請けExcelインポート、F5: 管理画面（基本CRUD）、F6: ドライバー支払明細Excel出力 をスコープとする。F2/F4（Claude Haiku解析・自動照合）は Phase 2 に分離。"
+  "description": "STEELO 稼働照合・ドライバー支払明細システムの Phase 1 MVP。F1: LINEメッセージ受信・蓄積、F3: 元請けExcelインポート、F5: 管理画面（基本CRUD）、F6: ドライバー支払明細Excel出力 をスコープとする。F2/F4（Claude Haiku解析・自動照合）は Phase 2 に分離。Phase 1 のプロダクト価値は『支払明細生成の半自動化』であり、自動照合（稼働照合）は Phase 2 で完成する。",
+  "review": {
+    "codex_review": {
+      "performed_at": "2026-05-20T13:34:00+09:00",
+      "model": "gpt-5.5",
+      "report_path": ".kiro/specs/phase1-mvp/codex-review.md",
+      "findings": { "critical": 4, "high": 8, "medium": 7, "low": 2 },
+      "status": "reflected",
+      "note": "20件をdesign/requirements/steeringに反映済み。残1件（Drizzle ORM不整合）はレビュープロンプト側の誤情報に起因しており実態に該当なしのため非適用。"
+    }
+  }
 }
