@@ -34,6 +34,8 @@ export * from './driver-deductions';
 export * from './line-messages';
 export * from './dispatch-records';
 export * from './import-batches';
+export * from './payment-summaries';
+export * from './audit-logs';
 
 /**
  * Thin wrapper around D1Database.

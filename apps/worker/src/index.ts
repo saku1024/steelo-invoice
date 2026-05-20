@@ -71,6 +71,18 @@ import { messageTemplates } from './routes/message-templates.js';
 import dedupPreview from './routes/dedup-preview.js';
 import { profileRefresh } from './routes/profile-refresh.js';
 import { richMenuGroups } from './routes/rich-menu-groups.js';
+// STEELO Phase 1
+import drivers from './routes/drivers.js';
+import driverAliases from './routes/driver-aliases.js';
+import driverDeductions from './routes/driver-deductions.js';
+import dispatchRecords from './routes/dispatch-records.js';
+import excelImports from './routes/excel-imports.js';
+import paymentSummaries from './routes/payment-summaries.js';
+import paymentJobs from './routes/payment-jobs.js';
+import auditLogs from './routes/audit-logs.js';
+import { steeloCors } from './middleware/steelo-cors.js';
+import { runPaymentJob } from './services/payment-batch-job.js';
+import { deleteExpiredImportPreviews, getQueuedPaymentJobs } from '@line-crm/db';
 import { isLinkPreviewBot } from './lib/og-bot.js';
 import { buildOgHtml } from './lib/og-html.js';
 import {
@@ -108,8 +120,24 @@ export type Env = {
 
 const app = new Hono<Env>();
 
-// CORS — allow all origins for MVP
+// CORS — 既存 LINE Harness は全 origin 許可。STEELO 系の origin 限定 CORS は
+// 下の steeloCors() で対象パスにのみ適用する。
 app.use('*', cors({ origin: '*' }));
+
+// STEELO 専用 CORS（origin 許可リスト方式、Cloudflare Access の後段）
+app.use('/api/drivers/*', steeloCors());
+app.use('/api/drivers', steeloCors());
+app.use('/api/driver-aliases/*', steeloCors());
+app.use('/api/driver-aliases', steeloCors());
+app.use('/api/driver-deductions/*', steeloCors());
+app.use('/api/driver-deductions', steeloCors());
+app.use('/api/dispatch-records/*', steeloCors());
+app.use('/api/dispatch-records', steeloCors());
+app.use('/api/excel-imports/*', steeloCors());
+app.use('/api/excel-imports', steeloCors());
+app.use('/api/payment-summaries/*', steeloCors());
+app.use('/api/payment-summaries', steeloCors());
+app.use('/api/audit-logs', steeloCors());
 
 // Rate limiting — runs before auth to block abuse early
 app.use('*', rateLimitMiddleware);
@@ -163,6 +191,15 @@ app.route('/', messageTemplates);
 app.route('/', dedupPreview);
 app.route('/', profileRefresh);
 app.route('/', richMenuGroups);
+// STEELO Phase 1
+app.route('/', drivers);
+app.route('/', driverAliases);
+app.route('/', driverDeductions);
+app.route('/', dispatchRecords);
+app.route('/', excelImports);
+app.route('/', paymentJobs);
+app.route('/', paymentSummaries);
+app.route('/', auditLogs);
 
 // Self-hosted QR code proxy — prevents leaking ref tokens to third-party services
 app.get('/api/qr', async (c) => {
@@ -853,10 +890,58 @@ async function scheduled(
   // (planned alongside the multi-provider UI work). Keeping the service file
   // (apps/worker/src/services/duplicate-detect.ts) and the existing
   // `重複:` tag rows untouched until that replacement lands.
+
+  // STEELO Phase 1: 期限切れ import_previews を物理削除し、R2 オブジェクトも掃除
+  try {
+    const cleaned = await deleteExpiredImportPreviews(env.DB);
+    if (cleaned.rowsDeleted > 0 && env.STEELO_FILES) {
+      for (const key of cleaned.r2Keys) {
+        try {
+          await env.STEELO_FILES.delete(key);
+        } catch (e) {
+          console.warn('[steelo] R2 delete failed:', key, e);
+        }
+      }
+      console.log(`[steelo] cleaned ${cleaned.rowsDeleted} expired previews`);
+    }
+  } catch (e) {
+    console.error('[steelo] preview cleanup error:', e);
+  }
+
+  // STEELO Phase 1: PAYMENT_JOB_QUEUE 未バインド時の fallback。
+  // 5分粒度の cron で queued なジョブを最大3件まで逐次実行する。
+  if (!env.PAYMENT_JOB_QUEUE) {
+    try {
+      const jobs = await getQueuedPaymentJobs(env.DB, 3);
+      for (const j of jobs) {
+        await runPaymentJob(env as Env['Bindings'], j.id);
+      }
+    } catch (e) {
+      console.error('[steelo] scheduled payment job fallback error:', e);
+    }
+  }
+}
+
+// STEELO Phase 1: Queues consumer。`payment-job-queue` から jobId を受け取り、
+// `runPaymentJob` で 1 ジョブを処理する。1メッセージ = 1ジョブ（max_batch_size=1）。
+async function queue(
+  batch: MessageBatch<{ jobId: string }>,
+  env: Env['Bindings']
+): Promise<void> {
+  for (const message of batch.messages) {
+    try {
+      await runPaymentJob(env, message.body.jobId);
+      message.ack();
+    } catch (e) {
+      console.error('[steelo] queue consumer error:', e);
+      message.retry();
+    }
+  }
 }
 
 export default {
   fetch: app.fetch,
   scheduled,
+  queue,
 };
 // redeploy trigger
