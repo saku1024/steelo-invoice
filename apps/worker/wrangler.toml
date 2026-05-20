@@ -27,6 +27,28 @@ database_id = "YOUR_DEV_D1_DATABASE_ID"
 binding = "IMAGES"
 bucket_name = "line-harness-images"
 
+# STEELO Phase 1: preview JSON 短期キャッシュ + 生成済み xlsx / ZIP の永続保管。
+# プレフィックス例:
+#   preview/{previewId}.json
+#   generated/{period}/{job_id}/{driver_name}.xlsx
+#   generated/{period}/{job_id}/all.zip
+# 配信は 15 分の短命署名付き URL でブラウザから直接 GET する。
+[[r2_buckets]]
+binding = "STEELO_FILES"
+bucket_name = "steelo-files"
+
+# STEELO Phase 1: 一括支払明細生成の非同期ジョブキュー。
+# Queues 利用不可な環境では payment_jobs テーブル + Scheduled cron で代替する
+# （README "STEELO Phase 1 セットアップ" 参照）。
+[[queues.producers]]
+binding = "PAYMENT_JOB_QUEUE"
+queue = "payment-job-queue"
+
+[[queues.consumers]]
+queue = "payment-job-queue"
+max_batch_size = 1
+max_concurrency = 1
+
 [triggers]
 crons = ["*/5 * * * *", "0 */6 * * *"]
 
@@ -51,6 +73,19 @@ database_id = "YOUR_D1_DATABASE_ID"
 [[env.production.r2_buckets]]
 binding = "IMAGES"
 bucket_name = "line-harness-images"
+
+[[env.production.r2_buckets]]
+binding = "STEELO_FILES"
+bucket_name = "steelo-files"
+
+[[env.production.queues.producers]]
+binding = "PAYMENT_JOB_QUEUE"
+queue = "payment-job-queue"
+
+[[env.production.queues.consumers]]
+queue = "payment-job-queue"
+max_batch_size = 1
+max_concurrency = 1
 
 [env.production.triggers]
 crons = ["*/5 * * * *", "0 */6 * * *"]

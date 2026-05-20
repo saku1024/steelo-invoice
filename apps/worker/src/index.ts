@@ -96,6 +96,10 @@ export type Env = {
     X_HARNESS_URL?: string;  // Optional: X Harness API URL for account linking
     IG_HARNESS_URL?: string;  // Optional: IG Harness API URL for cross-platform linking
     IG_HARNESS_LINK_SECRET?: string;  // Shared secret for IG Harness link-line webhook
+    // STEELO Phase 1
+    STEELO_FILES?: R2Bucket;       // preview JSON + 生成済み xlsx/ZIP（任意：未バインドでも既存機能は動く）
+    PAYMENT_JOB_QUEUE?: Queue;     // 一括支払明細ジョブキュー（未バインドなら Scheduled fallback）
+    STEELO_WEB_ORIGINS?: string;   // STEELO 専用 CORS の許可 origin（カンマ区切り）
   };
   Variables: {
     staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' };
