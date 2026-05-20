@@ -55,6 +55,34 @@ export async function recordAudit(
 }
 
 /**
+ * `recordAudit` の失敗で本処理のレスポンスが 500 になるのを防ぐためのラッパー。
+ *
+ * Codex impl review MEDIUM #11 反映:
+ *   理想的には audit_logs は本処理と同一 D1 batch() で書きたいが、createDriver や
+ *   updateDriver は SELECT を含むため batch 化できない。本ラッパーは
+ *   「データ操作は成功した／監査だけ失敗した」状態を `console.error` に出して
+ *   レスポンスは成功で返す。完全な atomic 性が要る import_confirm 系では
+ *   引き続き `confirmImportBatch` 内の batch() で同梱する。
+ */
+export async function safeAudit(
+  db: D1Database,
+  c: Context<Env>,
+  entry: AuditEntry
+): Promise<void> {
+  try {
+    await recordAudit(db, c, entry);
+  } catch (e) {
+    console.error(
+      '[audit-soft-fail]',
+      entry.action,
+      entry.resourceType,
+      entry.resourceId,
+      e
+    );
+  }
+}
+
+/**
  * Context の取れない場面（Webhook の waitUntil 等）から呼び出すための簡易版。
  * actor が確定できない場合に system actor を使う。
  */

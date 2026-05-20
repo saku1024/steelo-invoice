@@ -8,7 +8,7 @@ import {
   type PaymentJobRow,
 } from '@line-crm/db';
 import type { PaymentJob } from '@line-crm/shared';
-import { recordAudit } from '../services/audit.js';
+import { safeAudit } from '../services/audit.js';
 import { runPaymentJob } from '../services/payment-batch-job.js';
 import type { Env } from '../index.js';
 
@@ -49,7 +49,7 @@ paymentJobs.post('/api/payment-summaries/jobs', async (c) => {
         requestedBy: staff?.id ?? 'unknown',
         totalDrivers: drivers.length,
       });
-      await recordAudit(c.env.DB, c, {
+      await safeAudit(c.env.DB, c, {
         action: 'payment_job_request',
         resourceType: 'payment_job',
         resourceId: job.id,

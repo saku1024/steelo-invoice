@@ -118,14 +118,21 @@ excelImports.post('/api/excel-imports/preview', async (c) => {
       warnings: parsed.warnings,
     };
 
+    // Codex impl review LOW #18 反映: STEELO_FILES は Phase 1 で必須。
+    // 未バインド時に D1 へ JSON を埋める fallback は撤廃し、500 で fail-fast する。
     if (!c.env.STEELO_FILES) {
-      // R2 未バインド時は in-DB に JSON を埋めるフォールバック
-      console.warn('[excel-imports] STEELO_FILES not bound; falling back to DB-only preview');
-    } else {
-      await c.env.STEELO_FILES.put(r2Key, JSON.stringify(cacheBody), {
-        customMetadata: { period: parsed.header.period, previewId },
-      });
+      console.error('[excel-imports] STEELO_FILES binding missing; refusing preview');
+      return c.json(
+        {
+          success: false,
+          error: 'storage not configured (STEELO_FILES binding required)',
+        },
+        500
+      );
     }
+    await c.env.STEELO_FILES.put(r2Key, JSON.stringify(cacheBody), {
+      customMetadata: { period: parsed.header.period, previewId },
+    });
 
     const summary = {
       period: parsed.header.period,
@@ -147,7 +154,8 @@ excelImports.post('/api/excel-imports/preview', async (c) => {
       period: parsed.header.period,
       fileName,
       rowCount: rowsResolved.length,
-      summaryJson: JSON.stringify({ ...summary, cacheBody: c.env.STEELO_FILES ? undefined : cacheBody }),
+      // R2 必須化により D1 fallback は不要、summary のみ保存
+      summaryJson: JSON.stringify(summary),
       r2Key,
       createdBy: staff?.id ?? 'unknown',
       expiresAt,
@@ -188,25 +196,25 @@ excelImports.post('/api/excel-imports/confirm', async (c) => {
       return c.json({ success: false, error: 'preview expired' }, 404);
     }
 
-    let cacheBody: {
+    if (!c.env.STEELO_FILES) {
+      return c.json(
+        {
+          success: false,
+          error: 'storage not configured (STEELO_FILES binding required)',
+        },
+        500
+      );
+    }
+    const obj = await c.env.STEELO_FILES.get(preview.r2_key);
+    if (!obj) {
+      return c.json({ success: false, error: 'preview body missing on R2' }, 410);
+    }
+    const cacheBody: {
       header: ParsedExcel['header'];
       rows: ClientRecordInput[];
       fileName: string;
       warnings: string[];
-    } | null = null;
-    if (c.env.STEELO_FILES) {
-      const obj = await c.env.STEELO_FILES.get(preview.r2_key);
-      if (!obj) {
-        return c.json({ success: false, error: 'preview body missing on R2' }, 410);
-      }
-      cacheBody = JSON.parse(await obj.text());
-    } else {
-      const summary = JSON.parse(preview.summary_json);
-      cacheBody = summary.cacheBody;
-    }
-    if (!cacheBody) {
-      return c.json({ success: false, error: 'preview body unavailable' }, 410);
-    }
+    } = JSON.parse(await obj.text());
 
     const staff = c.get('staff');
     let result;
@@ -248,9 +256,7 @@ excelImports.post('/api/excel-imports/confirm', async (c) => {
     }
     // preview を掃除
     await deleteImportPreview(c.env.DB, body.previewId);
-    if (c.env.STEELO_FILES) {
-      await c.env.STEELO_FILES.delete(preview.r2_key);
-    }
+    await c.env.STEELO_FILES.delete(preview.r2_key);
     return c.json({ success: true, data: { ok: true, batchId: result.batchId, archivedBatchId: result.archivedBatchId } });
   } catch (err) {
     console.error('POST /api/excel-imports/confirm error:', err);

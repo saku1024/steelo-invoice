@@ -29,6 +29,14 @@ auditLogs.get('/api/audit-logs', async (c) => {
     }
     const limitRaw = c.req.query('limit');
     const offsetRaw = c.req.query('offset');
+    const limit = limitRaw ? Math.min(Math.max(1, Number(limitRaw)), 500) : undefined;
+    const offset = offsetRaw ? Math.max(0, Number(offsetRaw)) : undefined;
+    if (limitRaw && Number.isNaN(Number(limitRaw))) {
+      return c.json({ success: false, error: 'limit must be a number' }, 400);
+    }
+    if (offsetRaw && Number.isNaN(Number(offsetRaw))) {
+      return c.json({ success: false, error: 'offset must be a number' }, 400);
+    }
     const result = await listAuditLogs(c.env.DB, {
       actorId: c.req.query('actor') ?? undefined,
       action: c.req.query('action') ?? undefined,
@@ -36,8 +44,8 @@ auditLogs.get('/api/audit-logs', async (c) => {
       resourceId: c.req.query('resource_id') ?? undefined,
       from: c.req.query('from') ?? undefined,
       to: c.req.query('to') ?? undefined,
-      limit: limitRaw ? Number(limitRaw) : undefined,
-      offset: offsetRaw ? Number(offsetRaw) : undefined,
+      limit,
+      offset,
     });
     return c.json({
       success: true,

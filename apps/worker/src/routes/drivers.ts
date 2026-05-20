@@ -10,7 +10,7 @@ import {
 } from '@line-crm/db';
 import type { Driver } from '@line-crm/shared';
 import type { Env } from '../index.js';
-import { recordAudit } from '../services/audit.js';
+import { safeAudit } from '../services/audit.js';
 
 const drivers = new Hono<Env>();
 
@@ -67,7 +67,7 @@ drivers.post('/api/drivers', async (c) => {
       isActive: asBool(body.isActive, true),
       notes: optString(body.notes),
     });
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'driver_create',
       resourceType: 'driver',
       resourceId: created.id,
@@ -102,7 +102,7 @@ drivers.patch('/api/drivers/:id', async (c) => {
       notes: 'notes' in body ? optString(body.notes) : undefined,
     });
     if (!updated) return c.json({ success: false, error: 'Not found' }, 404);
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'driver_update',
       resourceType: 'driver',
       resourceId: id,
@@ -127,7 +127,7 @@ drivers.delete('/api/drivers/:id', async (c) => {
     const id = c.req.param('id');
     const row = await archiveDriver(c.env.DB, id);
     if (!row) return c.json({ success: false, error: 'Not found' }, 404);
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'driver_archive',
       resourceType: 'driver',
       resourceId: id,

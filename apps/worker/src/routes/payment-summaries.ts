@@ -15,7 +15,7 @@ import type { PaymentResult } from '@line-crm/shared';
 import type { DriverPaymentSummary } from '@line-crm/shared';
 import { calculatePayment } from '../services/payment-calculator.js';
 import { buildDriverExcel, makeFileName } from '../services/excel-export.js';
-import { recordAudit } from '../services/audit.js';
+import { safeAudit } from '../services/audit.js';
 import type { Env } from '../index.js';
 
 const paymentSummaries = new Hono<Env>();
@@ -47,7 +47,9 @@ function serialize(r: DriverPaymentSummaryRow): DriverPaymentSummary {
 paymentSummaries.get('/api/payment-summaries', async (c) => {
   try {
     const period = c.req.query('period');
-    if (!period) return c.json({ success: false, error: 'period required' }, 400);
+    if (!period || !/^\d{4}-\d{2}$/.test(period)) {
+      return c.json({ success: false, error: 'period (YYYY-MM) required' }, 400);
+    }
     const rows = await listDriverPaymentSummariesByPeriod(c.env.DB, period);
     return c.json({ success: true, data: rows.map(serialize) });
   } catch (err) {
@@ -63,8 +65,11 @@ paymentSummaries.get('/api/payment-summaries', async (c) => {
 paymentSummaries.post('/api/payment-summaries/generate', async (c) => {
   try {
     const body = await c.req.json<{ driverId?: string; period?: string }>();
-    if (!body.driverId || !body.period) {
-      return c.json({ success: false, error: 'driverId and period are required' }, 400);
+    if (typeof body.driverId !== 'string' || body.driverId.trim() === '') {
+      return c.json({ success: false, error: 'driverId is required' }, 400);
+    }
+    if (typeof body.period !== 'string' || !/^\d{4}-\d{2}$/.test(body.period)) {
+      return c.json({ success: false, error: 'period (YYYY-MM) required' }, 400);
     }
     const result = await generateForDriver(c.env, c, body.driverId, body.period);
     if ('error' in result) return c.json({ success: false, error: result.error }, result.status);
@@ -275,7 +280,7 @@ async function generateForDriver(
   );
 
   // 監査
-  await recordAudit(env.DB, c, {
+  await safeAudit(env.DB, c, {
     action: 'payment_generate',
     resourceType: 'payment_summary',
     resourceId: summary.id,

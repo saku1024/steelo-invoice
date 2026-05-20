@@ -2,12 +2,22 @@ import { Hono } from 'hono';
 import {
   listDispatchRecords,
   getDispatchRecordById,
+  getDriverById,
   createDispatchRecord,
   updateDispatchRecord,
   type DispatchRecordRow,
 } from '@line-crm/db';
 import type { DispatchRecord } from '@line-crm/shared';
-import { recordAudit } from '../services/audit.js';
+import { safeAudit } from '../services/audit.js';
+import {
+  asDateStr,
+  asInt,
+  asTimeStr,
+  clampLimit,
+  clampOffset,
+  isNonEmptyString,
+  optString,
+} from '../services/validation.js';
 import type { Env } from '../index.js';
 
 const dispatchRecords = new Hono<Env>();
@@ -35,10 +45,10 @@ function serialize(r: DispatchRecordRow): DispatchRecord {
 dispatchRecords.get('/api/dispatch-records', async (c) => {
   try {
     const driverId = c.req.query('driver_id') ?? undefined;
-    const from = c.req.query('from') ?? undefined;
-    const to = c.req.query('to') ?? undefined;
-    const limit = c.req.query('limit') ? Number(c.req.query('limit')) : undefined;
-    const offset = c.req.query('offset') ? Number(c.req.query('offset')) : undefined;
+    const from = asDateStr(c.req.query('from')) ?? undefined;
+    const to = asDateStr(c.req.query('to')) ?? undefined;
+    const limit = clampLimit(c.req.query('limit'), 100, 500);
+    const offset = clampOffset(c.req.query('offset'));
     const r = await listDispatchRecords(c.env.DB, { driverId, from, to, limit, offset });
     return c.json({
       success: true,
@@ -52,24 +62,34 @@ dispatchRecords.get('/api/dispatch-records', async (c) => {
 
 dispatchRecords.post('/api/dispatch-records', async (c) => {
   try {
-    const body = await c.req.json<{ driverId?: string; workDate?: string } & Record<string, unknown>>();
-    if (!body.driverId) return c.json({ success: false, error: 'driverId is required' }, 400);
-    if (!body.workDate || !/^\d{4}-\d{2}-\d{2}$/.test(body.workDate)) {
+    const body = await c.req.json<Record<string, unknown>>();
+    if (!isNonEmptyString(body.driverId)) {
+      return c.json({ success: false, error: 'driverId is required' }, 400);
+    }
+    const workDate = asDateStr(body.workDate);
+    if (!workDate) {
       return c.json({ success: false, error: 'workDate must be YYYY-MM-DD' }, 400);
+    }
+    // driver 存在チェック（FK 違反による 500 を防ぐ）
+    const driver = await getDriverById(c.env.DB, body.driverId);
+    if (!driver) return c.json({ success: false, error: 'driver not found' }, 404);
+    const taskNumber = body.taskNumber === undefined ? null : asInt(body.taskNumber);
+    if (body.taskNumber !== undefined && (taskNumber === null || taskNumber < 0 || taskNumber > 99)) {
+      return c.json({ success: false, error: 'taskNumber must be integer 0-99' }, 400);
     }
     const row = await createDispatchRecord(c.env.DB, {
       driverId: body.driverId,
-      workDate: body.workDate,
-      taskNumber: (body.taskNumber as number) ?? null,
-      taskName: (body.taskName as string) ?? null,
-      pickupLocation: (body.pickupLocation as string) ?? null,
-      deliveryLocation: (body.deliveryLocation as string) ?? null,
-      startTime: (body.startTime as string) ?? null,
-      endTime: (body.endTime as string) ?? null,
-      managementNumber: (body.managementNumber as string) ?? null,
-      rawMessageId: (body.rawMessageId as string) ?? null,
+      workDate,
+      taskNumber,
+      taskName: optString(body.taskName, 200),
+      pickupLocation: optString(body.pickupLocation, 200),
+      deliveryLocation: optString(body.deliveryLocation, 200),
+      startTime: asTimeStr(body.startTime),
+      endTime: asTimeStr(body.endTime),
+      managementNumber: optString(body.managementNumber, 100),
+      rawMessageId: optString(body.rawMessageId, 100),
     });
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'dispatch_create',
       resourceType: 'dispatch_record',
       resourceId: row.id,
@@ -88,9 +108,25 @@ dispatchRecords.patch('/api/dispatch-records/:id', async (c) => {
     const before = await getDispatchRecordById(c.env.DB, id);
     if (!before) return c.json({ success: false, error: 'Not found' }, 404);
     const body = await c.req.json<Record<string, unknown>>();
+    // workDate/time/taskNumber は形式検証
+    if ('workDate' in body && !asDateStr(body.workDate)) {
+      return c.json({ success: false, error: 'workDate must be YYYY-MM-DD' }, 400);
+    }
+    if ('startTime' in body && body.startTime !== null && asTimeStr(body.startTime) === null) {
+      return c.json({ success: false, error: 'startTime must be HH:MM' }, 400);
+    }
+    if ('endTime' in body && body.endTime !== null && asTimeStr(body.endTime) === null) {
+      return c.json({ success: false, error: 'endTime must be HH:MM' }, 400);
+    }
+    if ('taskNumber' in body && body.taskNumber !== null) {
+      const n = asInt(body.taskNumber);
+      if (n === null || n < 0 || n > 99) {
+        return c.json({ success: false, error: 'taskNumber must be integer 0-99' }, 400);
+      }
+    }
     const updated = await updateDispatchRecord(c.env.DB, id, body);
     if (!updated) return c.json({ success: false, error: 'Not found' }, 404);
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'dispatch_update',
       resourceType: 'dispatch_record',
       resourceId: id,

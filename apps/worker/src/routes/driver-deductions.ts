@@ -8,7 +8,7 @@ import {
 } from '@line-crm/db';
 import type { DriverDeduction } from '@line-crm/shared';
 import type { Env } from '../index.js';
-import { recordAudit } from '../services/audit.js';
+import { safeAudit } from '../services/audit.js';
 
 const driverDeductions = new Hono<Env>();
 
@@ -41,26 +41,37 @@ driverDeductions.get('/api/driver-deductions', async (c) => {
 
 driverDeductions.put('/api/driver-deductions', async (c) => {
   try {
-    const body = await c.req.json<{
-      driverId?: string;
-      period?: string;
-      vehicleCost?: number;
-      processingFee?: number;
-      prepayment?: number;
-      notes?: string | null;
-    }>();
+    // 受信 body は runtime では何でも来うるため Record<string, unknown> で受ける
+    const body = (await c.req.json()) as Record<string, unknown>;
 
-    if (!body.driverId || !body.period) {
+    if (typeof body.driverId !== 'string' || body.driverId.trim() === '' ||
+        typeof body.period !== 'string') {
       return c.json({ success: false, error: 'driverId and period are required' }, 400);
     }
     if (!/^\d{4}-\d{2}$/.test(body.period)) {
       return c.json({ success: false, error: 'period must be YYYY-MM' }, 400);
     }
+    // 非負整数として正規化（"1000" / 1000 を受ける、負値は拒否、上限 1000 万円）
+    const validated: Record<'vehicleCost' | 'processingFee' | 'prepayment', number> = {
+      vehicleCost: 0,
+      processingFee: 0,
+      prepayment: 0,
+    };
     for (const k of ['vehicleCost', 'processingFee', 'prepayment'] as const) {
-      const v = body[k];
-      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
-        return c.json({ success: false, error: `${k} must be a non-negative integer` }, 400);
+      const raw = body[k];
+      let n: number | null = null;
+      if (typeof raw === 'number' && Number.isFinite(raw)) n = Math.round(raw);
+      else if (typeof raw === 'string' && raw.trim() !== '') {
+        const parsed = Number(raw.trim().replace(/[,\s]/g, ''));
+        if (!Number.isNaN(parsed)) n = Math.round(parsed);
       }
+      if (n === null || n < 0 || n > 10_000_000) {
+        return c.json(
+          { success: false, error: `${k} must be integer 0-10000000` },
+          400
+        );
+      }
+      validated[k] = n;
     }
 
     const driver = await getDriverById(c.env.DB, body.driverId);
@@ -71,13 +82,13 @@ driverDeductions.put('/api/driver-deductions', async (c) => {
     const row = await upsertDriverDeduction(c.env.DB, {
       driverId: body.driverId,
       period: body.period,
-      vehicleCost: body.vehicleCost as number,
-      processingFee: body.processingFee as number,
-      prepayment: body.prepayment as number,
-      notes: body.notes ?? null,
+      vehicleCost: validated.vehicleCost,
+      processingFee: validated.processingFee,
+      prepayment: validated.prepayment,
+      notes: typeof body.notes === 'string' ? body.notes.slice(0, 1000) : null,
       updatedBy: staff?.id ?? null,
     });
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'deduction_update',
       resourceType: 'driver_deduction',
       resourceId: row.id,

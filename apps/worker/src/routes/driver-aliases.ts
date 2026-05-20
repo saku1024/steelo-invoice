@@ -9,7 +9,7 @@ import {
 } from '@line-crm/db';
 import type { DriverAlias } from '@line-crm/shared';
 import type { Env } from '../index.js';
-import { recordAudit } from '../services/audit.js';
+import { safeAudit } from '../services/audit.js';
 
 const driverAliases = new Hono<Env>();
 
@@ -53,7 +53,7 @@ driverAliases.post('/api/driver-aliases', async (c) => {
       driverId: body.driverId,
       aliasName: body.aliasName.trim(),
     });
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'driver_alias_create',
       resourceType: 'driver_alias',
       resourceId: created.id,
@@ -76,7 +76,7 @@ driverAliases.delete('/api/driver-aliases/:id', async (c) => {
   try {
     const id = c.req.param('id');
     await deleteDriverAlias(c.env.DB, id);
-    await recordAudit(c.env.DB, c, {
+    await safeAudit(c.env.DB, c, {
       action: 'driver_alias_delete',
       resourceType: 'driver_alias',
       resourceId: id,
