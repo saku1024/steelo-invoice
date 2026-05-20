@@ -32,6 +32,16 @@ import type {
   EntryRouteFunnel,
   TrafficPool,
   PoolAccount,
+  // STEELO Phase 1
+  Driver,
+  DriverAlias,
+  DriverDeduction,
+  LineMessage,
+  DispatchRecord,
+  ImportBatch,
+  DriverPaymentSummary,
+  PaymentJob,
+  AuditLog,
 } from '@line-crm/shared'
 
 /** Broadcast type from API (now camelCase after worker serialization) */
@@ -1597,3 +1607,292 @@ export const eventsApi = {
       withAccount('/api/events/admin/events/notifications/pending', accountId),
     ),
 };
+
+// =============================================================================
+// STEELO Phase 1: 運送業ドメイン API
+// =============================================================================
+
+/**
+ * 認証付き fetch で Blob を取得し、安全に DL する。
+ * `<a href download>` は Authorization ヘッダを送れないため使わない。
+ */
+export async function downloadBlob(
+  path: string,
+  fallbackFilename: string,
+): Promise<void> {
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: { Authorization: `Bearer ${getApiKey()}` },
+  })
+  if (!res.ok) {
+    throw new Error(`download failed: ${res.status}`)
+  }
+  const blob = await res.blob()
+  const disposition = res.headers.get('Content-Disposition') || ''
+  const m = disposition.match(/filename\*=UTF-8''([^;]+)/) || disposition.match(/filename="([^"]+)"/)
+  const fileName = m ? decodeURIComponent(m[1]) : fallbackFilename
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+export const steelo = {
+  drivers: {
+    list: (activeOnly?: boolean) =>
+      fetchApi<ApiResponse<Driver[]>>(
+        `/api/drivers${activeOnly ? '?active=true' : ''}`,
+      ),
+    get: (id: string) => fetchApi<ApiResponse<Driver>>(`/api/drivers/${id}`),
+    create: (body: Partial<Driver>) =>
+      fetchApi<ApiResponse<Driver>>('/api/drivers', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    update: (id: string, body: Partial<Driver>) =>
+      fetchApi<ApiResponse<Driver>>(`/api/drivers/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    archive: (id: string) =>
+      fetchApi<ApiResponse<{ ok: true }>>(`/api/drivers/${id}`, {
+        method: 'DELETE',
+      }),
+  },
+  driverAliases: {
+    list: (driverId?: string) =>
+      fetchApi<ApiResponse<DriverAlias[]>>(
+        `/api/driver-aliases${driverId ? `?driver_id=${driverId}` : ''}`,
+      ),
+    create: (body: { driverId: string; aliasName: string }) =>
+      fetchApi<ApiResponse<DriverAlias>>('/api/driver-aliases', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    delete: (id: string) =>
+      fetchApi<ApiResponse<{ ok: true }>>(`/api/driver-aliases/${id}`, {
+        method: 'DELETE',
+      }),
+  },
+  driverDeductions: {
+    list: (params: { period?: string; driverId?: string } = {}) => {
+      const qs = new URLSearchParams()
+      if (params.period) qs.set('period', params.period)
+      if (params.driverId) qs.set('driver_id', params.driverId)
+      return fetchApi<ApiResponse<DriverDeduction[]>>(
+        `/api/driver-deductions${qs.toString() ? '?' + qs : ''}`,
+      )
+    },
+    upsert: (body: {
+      driverId: string
+      period: string
+      vehicleCost: number
+      processingFee: number
+      prepayment: number
+      notes?: string | null
+    }) =>
+      fetchApi<ApiResponse<DriverDeduction>>('/api/driver-deductions', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+  },
+  lineMessages: {
+    list: (params: {
+      driverId?: string
+      groupId?: string
+      from?: string
+      to?: string
+      messageType?: string
+      limit?: number
+      offset?: number
+    } = {}) => {
+      const qs = new URLSearchParams()
+      if (params.driverId) qs.set('driver_id', params.driverId)
+      if (params.groupId) qs.set('group_id', params.groupId)
+      if (params.from) qs.set('from', params.from)
+      if (params.to) qs.set('to', params.to)
+      if (params.messageType) qs.set('type', params.messageType)
+      if (params.limit !== undefined) qs.set('limit', String(params.limit))
+      if (params.offset !== undefined) qs.set('offset', String(params.offset))
+      return fetchApi<ApiResponse<{ items: LineMessage[]; total: number }>>(
+        `/api/line-messages${qs.toString() ? '?' + qs : ''}`,
+      )
+    },
+  },
+  dispatchRecords: {
+    list: (params: { driverId?: string; from?: string; to?: string } = {}) => {
+      const qs = new URLSearchParams()
+      if (params.driverId) qs.set('driver_id', params.driverId)
+      if (params.from) qs.set('from', params.from)
+      if (params.to) qs.set('to', params.to)
+      return fetchApi<ApiResponse<{ items: DispatchRecord[]; total: number }>>(
+        `/api/dispatch-records${qs.toString() ? '?' + qs : ''}`,
+      )
+    },
+    create: (body: Partial<DispatchRecord>) =>
+      fetchApi<ApiResponse<DispatchRecord>>('/api/dispatch-records', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    update: (id: string, body: Partial<DispatchRecord>) =>
+      fetchApi<ApiResponse<DispatchRecord>>(`/api/dispatch-records/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+  },
+  excelImports: {
+    listBatches: (params: { period?: string; status?: string } = {}) => {
+      const qs = new URLSearchParams()
+      if (params.period) qs.set('period', params.period)
+      if (params.status) qs.set('status', params.status)
+      return fetchApi<ApiResponse<ImportBatch[]>>(
+        `/api/excel-imports${qs.toString() ? '?' + qs : ''}`,
+      )
+    },
+    /**
+     * preview は multipart upload。fetchApi は Content-Type を上書きするため
+     * 別パスで実装する。
+     */
+    preview: async (file: File): Promise<ApiResponse<PreviewResponse>> => {
+      const form = new FormData()
+      form.append('file', file)
+      const res = await fetch(`${API_URL}/api/excel-imports/preview`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getApiKey()}` },
+        body: form,
+      })
+      // 4xx でも JSON 本文が返る
+      if (res.status === 204) return { success: true, data: {} as PreviewResponse }
+      return (await res.json()) as ApiResponse<PreviewResponse>
+    },
+    confirm: (body: { previewId: string; overwrite?: boolean }) =>
+      fetchApi<ApiResponse<{ ok: true; batchId: string; archivedBatchId: string | null }>>(
+        '/api/excel-imports/confirm',
+        { method: 'POST', body: JSON.stringify(body) },
+      ),
+  },
+  paymentSummaries: {
+    list: (period: string) =>
+      fetchApi<ApiResponse<DriverPaymentSummary[]>>(
+        `/api/payment-summaries?period=${encodeURIComponent(period)}`,
+      ),
+    /** 個別生成（同期 API）— 返り値は xlsx Blob 自体（DL ヘルパに直接渡せる） */
+    generateAndDownload: async (driverId: string, period: string, driverName: string) => {
+      const res = await fetch(`${API_URL}/api/payment-summaries/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getApiKey()}`,
+        },
+        body: JSON.stringify({ driverId, period }),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`generate failed: ${res.status} ${text}`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${period}_${driverName}_支払明細.xlsx`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    },
+    downloadById: (summaryId: string, driverName: string, period: string) =>
+      downloadBlob(`/api/payment-summaries/${summaryId}/download`, `${period}_${driverName}_支払明細.xlsx`),
+  },
+  paymentJobs: {
+    enqueue: (period: string) =>
+      fetchApi<ApiResponse<{ jobId: string; statusUrl: string }>>(
+        '/api/payment-summaries/jobs',
+        { method: 'POST', body: JSON.stringify({ period }) },
+      ),
+    get: (jobId: string) =>
+      fetchApi<ApiResponse<PaymentJob>>(`/api/payment-summaries/jobs/${jobId}`),
+    downloadZip: (jobId: string, period: string) =>
+      downloadBlob(
+        `/api/payment-summaries/jobs/${jobId}/download`,
+        `${period}_payment_summaries.zip`,
+      ),
+    /** completed / failed まで poll する */
+    poll: async (jobId: string, opts: { intervalMs?: number; timeoutMs?: number } = {}) => {
+      const interval = opts.intervalMs ?? 3000
+      const timeout = opts.timeoutMs ?? 10 * 60_000
+      const start = Date.now()
+      while (Date.now() - start < timeout) {
+        const r = await fetchApi<ApiResponse<PaymentJob>>(
+          `/api/payment-summaries/jobs/${jobId}`,
+        )
+        if (!r.success) throw new Error('job lookup failed')
+        if (r.data.status === 'completed' || r.data.status === 'failed') {
+          return r.data
+        }
+        await new Promise((resolve) => setTimeout(resolve, interval))
+      }
+      throw new Error('job polling timed out')
+    },
+  },
+  auditLogs: {
+    list: (params: {
+      actor?: string
+      action?: string
+      resourceType?: string
+      resourceId?: string
+      from?: string
+      to?: string
+      limit?: number
+      offset?: number
+    } = {}) => {
+      const qs = new URLSearchParams()
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== undefined && v !== null && v !== '') qs.set(
+          k === 'resourceType' ? 'resource_type' : k === 'resourceId' ? 'resource_id' : k,
+          String(v),
+        )
+      }
+      return fetchApi<ApiResponse<{ items: AuditLog[]; total: number }>>(
+        `/api/audit-logs${qs.toString() ? '?' + qs : ''}`,
+      )
+    },
+  },
+}
+
+export type PreviewResponse = {
+  previewId: string
+  summary: {
+    period: string
+    totalFare: number
+    totalAdvance: number
+    headerVehicleCost: number
+    headerProcessingFee: number
+    headerPrepayment: number
+    commissionRate: number
+    taxRate: number
+    rowCount: number
+    unmatchedDrivers: { name: string; count: number }[]
+    warnings: string[]
+  }
+  rows: Array<{
+    driverId: string | null
+    workDay: number
+    dayOfWeek: string | null
+    taskName: string | null
+    pickupLocation: string | null
+    deliveryLocation: string | null
+    startTime: string | null
+    endTime: string | null
+    distanceKm: number | null
+    advancePayment: number
+    fare: number | null
+    driverName: string | null
+    notes: string | null
+  }>
+  warnings: string[]
+  unmatchedDrivers: { name: string; count: number }[]
+  expiresAt: string
+}

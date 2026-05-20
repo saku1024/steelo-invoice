@@ -5,15 +5,16 @@
 タスクは Foundation → Core → Integration → Validation の順で配置し、
 core 層では非依存タスクに `(P)` マーカーを付与する。
 
-## 進捗（バックエンド完了）
+## 進捗（全タスク完了）
 
-- **完了**: 32 / 43 サブタスク。バックエンド（Worker / DB / Excel / ジョブ / 監査）と
-  ベンチマーク・運用ドキュメントは全て完了
-- **残**: Web UI 8 件、ナビ/api.ts 拡張 2 件、統合テスト 1 件（Web 実装と並走可能）
-- **テスト**: STEELO 関連 68 件グリーン（worker 41 + db 27）、typecheck 全パッケージパス
+- **完了**: 43 / 43 サブタスク。バックエンド + Web UI + 統合テスト + ベンチ + 運用 doc を網羅
+- **テスト**: STEELO 関連 73 件グリーン（worker 46 + db 27）、typecheck 全パッケージパス、
+  Next.js build もエラーなく完了
 - **ベンチ**: 200 行 1 ヶ月分の xlsx 生成 11.2ms / +4.30MB（目標 2s / 16MB を大きくクリア）
 
-残タスクは Web UI 中心のため、別 PR / 別ブランチでの分割実装を想定。
+ready_for_implementation 段階は完了。次は本番デプロイの事前準備
+（`docs/operations/cloudflare-access.md` の手順、`docs/operations/phase1-acceptance.md`
+の手動チェック）に進む。
 
 ---
 
@@ -74,7 +75,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - 観測可能完了条件: Hono のテストアダプタで4エンドポイントが期待ステータスを返す
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
 
-- [ ] 2.3 ドライバーマスタ画面を実装する
+- [x] 2.3 ドライバーマスタ画面を実装する
   - 一覧（インボイス有無バッジ、有効/論理削除フィルタ）と編集モーダル
   - `has_invoice` 変更は過去サマリーに遡及しない旨を UI で明示
   - 観測可能完了条件: 開発サーバで20件登録 → 編集 → 削除 → 一覧反映が確認できる
@@ -98,7 +99,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Boundary: services/group-message-handler.ts, services/excel-import.ts（呼び出し側）_
   - _Requirements: 3.9, 8.2_
 
-- [ ] 3.3 別名マスタ UI と preview からの 1-click 別名追加を実装する
+- [x] 3.3 別名マスタ UI と preview からの 1-click 別名追加を実装する
   - `/driver-aliases` の一覧+追加+削除画面
   - excel-imports の preview 画面の「未紐付け DR 名」リストから既存ドライバーへの別名登録モーダルを開ける
   - 観測可能完了条件: preview 上で別名を追加→再 preview ボタン→未紐付け件数が即時減る
@@ -122,7 +123,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Boundary: routes/driver-deductions.ts_
   - _Requirements: 9.2, 9.4, 10.2_
 
-- [ ] 4.3 月次控除入力画面を実装する
+- [x] 4.3 月次控除入力画面を実装する
   - 月選択 + 全ドライバーの控除を1画面で一覧編集（vehicle_cost / processing_fee / prepayment / notes）
   - 行ごとに「保存」または一括保存
   - 観測可能完了条件: 20名分まとめて保存→再読込で値が永続化されている
@@ -153,7 +154,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Depends: 5.2_
   - _Requirements: 1.4, 1.6, 1.8_
 
-- [ ] 5.4 LINE メッセージ閲覧画面を実装する
+- [x] 5.4 LINE メッセージ閲覧画面を実装する
   - 一覧（受信日時降順、フィルタ）と詳細モーダル
   - 観測可能完了条件: 20件以上の蓄積に対しページング・絞り込みが動作する
   - _Requirements: 4.1, 4.2, 4.3_
@@ -168,7 +169,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Boundary: routes/dispatch-records.ts, packages/db (dispatch-records)_
   - _Requirements: 4.4, 4.5, 4.6_
 
-- [ ] 6.2 配車レコード一覧・編集画面を実装する
+- [x] 6.2 配車レコード一覧・編集画面を実装する
   - 作業日降順 + ドライバー名表示、新規/編集フォーム（元メッセージID任意）
   - 観測可能完了条件: 開発サーバで配車レコードの作成・更新が UI からできる
   - _Depends: 6.1_
@@ -200,7 +201,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Depends: 7.1, 7.2, 3.2_
   - _Requirements: 3.6, 3.7, 3.8, 3.9, 3.10, 10.2_
 
-- [ ] 7.4 Excel インポート UI を実装する
+- [x] 7.4 Excel インポート UI を実装する
   - アップロード → preview 画面（件数/サマリー/警告/未紐付け一覧）→ 確定ボタン → 完了表示
   - 既存 confirmed 検出時の「上書き / キャンセル」モーダル
   - 観測可能完了条件: 実 BOND's Excel 1ヶ月分を用いた手動シナリオで preview→confirm までが UI 経由で完結する
@@ -286,7 +287,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Depends: 11.3_
   - _Requirements: 5.7, 5.13_
 
-- [ ] 11.5 支払明細生成画面を実装する
+- [x] 11.5 支払明細生成画面を実装する
   - 月選択、個別 DL ボタン（fetch+Blob 方式）、一括ジョブ投入＋ポーリング、完了後の R2 直 DL ボタン
   - `<a href download>` で API を叩かないルールを厳守
   - 観測可能完了条件: 個別 → 同期 DL、一括 → ジョブ完了表示 → 署名付きURLで ZIP DL までを開発サーバで踏破
@@ -303,7 +304,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Boundary: routes/audit-logs.ts, packages/db (audit-logs)_
   - _Requirements: 10.3, 10.4_
 
-- [ ] 12.2 (P) 監査ログ閲覧画面を実装する
+- [x] 12.2 (P) 監査ログ閲覧画面を実装する
   - 一覧（時系列、フィルタ）+ payload_json の整形表示
   - 観測可能完了条件: 直近の `import_confirm` / `payment_generate` / `deduction_update` が画面から検索できる
   - _Boundary: apps/web/src/app/audit-logs_
@@ -321,13 +322,13 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Depends: 1.4, 2.2, 3.1, 4.2, 5.1, 6.1, 7.3, 10.2, 10.3, 11.2, 11.4, 12.1_
   - _Requirements: 6.3, 6.5, 6.6, 5.8_
 
-- [ ] 13.2 `app-shell.tsx` のナビゲーション項目を追加する
+- [x] 13.2 `app-shell.tsx` のナビゲーション項目を追加する
   - 「ドライバー」「ドライバー別名」「月次控除」「LINEメッセージ」「配車レコード」「Excelインポート」「支払明細生成」「監査ログ」
   - 既存 LINE Harness のメニューは無変更で共存させる
   - 観測可能完了条件: 既存メニューが消えず、新規8項目から各ページに遷移できる
   - _Requirements: 6.5, 6.6_
 
-- [ ] 13.3 Web `lib/api.ts` に新規エンドポイントの呼び出し関数を追加する
+- [x] 13.3 Web `lib/api.ts` に新規エンドポイントの呼び出し関数を追加する
   - Bearer 自動付与、fetch+Blob ヘルパ（個別 xlsx DL 用）、polling ヘルパ（payment-jobs 進捗用）
   - 観測可能完了条件: 各 UI が `<a download>` を使わずに DL できる
   - _Requirements: 6.4_
@@ -336,7 +337,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 14. Validation: テスト・ベンチ・手動シナリオ
 
-- [ ] 14.1 統合テスト（Worker 側）を追加する
+- [x] 14.1 統合テスト（Worker 側）を追加する
   - LINE group webhook → line_messages 保存 → 再送で行が増えない
   - Excel preview → confirm → 上書き → 409 のシナリオ
   - 個別支払明細生成 → スナップショット保存 → 再 DL（R2 hit）
