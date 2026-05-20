@@ -97,19 +97,18 @@ export function buildDriverExcel(input: ExportInput): Uint8Array {
     ]);
   }
 
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-
-  // マイナス値の赤字スタイル: finalAmount セル（B12 想定）
-  // SheetJS の OSS 版は cell.s のスタイル書き出しに制限があるため、まずは値の前に
-  // △ 記号を付けて視認性を確保する補助的表現を行う（design.md の「赤字表示」要件）。
+  // マイナス値の場合は、値自体は **数値のまま** 保持し（集計可能性を維持）、
+  // 直下に注意文言セルを追加して視認性を確保する。
+  // Codex impl review MEDIUM #12 反映。
   if (input.result.finalAmount < 0) {
-    const addr = XLSX.utils.encode_cell({ r: 11, c: 1 });
-    const cell = (ws as Record<string, XLSX.CellObject>)[addr];
-    if (cell) {
-      cell.t = 's';
-      cell.v = `▲ ${Math.abs(input.result.finalAmount).toLocaleString()}`;
-    }
+    aoa.splice(12, 0, [
+      `※支払額がマイナスです（控除で運賃を下回りました）`,
+      null,
+      null,
+      null,
+    ]);
   }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
   // 「日」「業務名」等の列幅を調整
   ws['!cols'] = [
     { wch: 4 },
@@ -128,8 +127,10 @@ export function buildDriverExcel(input: ExportInput): Uint8Array {
 
   XLSX.utils.book_append_sheet(wb, ws, '支払明細');
 
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
-  return new Uint8Array(buf);
+  // Cloudflare Workers では Node Buffer は使えない。SheetJS の type:'array' は
+  // ArrayBuffer-like（Uint8Array）を返すため、そのまま返す。
+  const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer | Uint8Array;
+  return out instanceof Uint8Array ? out : new Uint8Array(out);
 }
 
 export function makeFileName(period: string, driverName: string): string {

@@ -136,7 +136,7 @@ describe('buildDriverExcel', () => {
     expect(r2[9]).toBe('-');
   });
 
-  it('マイナス支払額は▲表示で記録される', () => {
+  it('マイナス支払額は数値のまま保持され、注意セルが追加される', () => {
     const result = calculatePayment({
       driver: { hasInvoice: false },
       rates: RATES,
@@ -166,8 +166,9 @@ describe('buildDriverExcel', () => {
     });
     const aoa = readBack(xlsx);
     const finalRow = aoa.find((r) => r[0] === 'お支払い金額合計');
-    expect(typeof finalRow![1]).toBe('string');
-    expect(finalRow![1]).toMatch(/^▲ /);
+    expect(typeof finalRow![1]).toBe('number');
+    expect(finalRow![1]).toBeLessThan(0);
+    expect(aoa.some((r) => typeof r[0] === 'string' && /マイナス/.test(r[0]))).toBe(true);
   });
 });
 

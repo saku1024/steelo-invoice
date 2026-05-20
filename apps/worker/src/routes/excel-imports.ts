@@ -17,7 +17,6 @@ import {
   XLSX_LIMITS,
   type ParsedExcel,
 } from '../services/excel-import.js';
-import { recordAudit } from '../services/audit.js';
 import type { Env } from '../index.js';
 
 const excelImports = new Hono<Env>();
@@ -227,6 +226,16 @@ excelImports.post('/api/excel-imports/confirm', async (c) => {
         confirmedBy: staff?.id ?? 'unknown',
         rows: cacheBody.rows,
         overwrite: body.overwrite === true,
+        // audit を同一 batch に組み込む (Codex impl review MEDIUM #11 反映)
+        audit: {
+          actorId: staff?.id ?? 'unknown',
+          actorName: staff?.name ?? 'unknown',
+          ip:
+            c.req.header('CF-Connecting-IP') ??
+            c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ??
+            null,
+          userAgent: c.req.header('User-Agent') ?? null,
+        },
       });
     } catch (e) {
       if (e instanceof ConfirmedBatchAlreadyExistsError) {
@@ -237,16 +246,6 @@ excelImports.post('/api/excel-imports/confirm', async (c) => {
       }
       throw e;
     }
-    await recordAudit(c.env.DB, c, {
-      action: result.archivedBatchId ? 'import_overwrite' : 'import_confirm',
-      resourceType: 'import_batch',
-      resourceId: result.batchId,
-      payload: {
-        period: cacheBody.header.period,
-        archived: result.archivedBatchId,
-        rowCount: cacheBody.rows.length,
-      },
-    });
     // preview を掃除
     await deleteImportPreview(c.env.DB, body.previewId);
     if (c.env.STEELO_FILES) {

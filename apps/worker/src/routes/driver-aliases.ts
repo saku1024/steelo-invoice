@@ -36,8 +36,16 @@ driverAliases.get('/api/driver-aliases', async (c) => {
 driverAliases.post('/api/driver-aliases', async (c) => {
   try {
     const body = await c.req.json<{ driverId?: string; aliasName?: string }>();
-    if (!body.driverId || !body.aliasName) {
+    if (
+      typeof body.driverId !== 'string' ||
+      typeof body.aliasName !== 'string' ||
+      !body.driverId.trim() ||
+      !body.aliasName.trim()
+    ) {
       return c.json({ success: false, error: 'driverId and aliasName are required' }, 400);
+    }
+    if (body.aliasName.length > 100) {
+      return c.json({ success: false, error: 'aliasName too long (max 100)' }, 400);
     }
     const driver = await getDriverById(c.env.DB, body.driverId);
     if (!driver) return c.json({ success: false, error: 'driver not found' }, 404);

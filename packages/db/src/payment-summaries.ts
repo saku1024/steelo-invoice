@@ -327,13 +327,52 @@ export async function getQueuedPaymentJobs(
   return r.results;
 }
 
-export async function markPaymentJobRunning(db: D1Database, id: string): Promise<void> {
-  await db
+/**
+ * `running` で長時間動いていない（worker クラッシュ等で取り残された）ジョブを
+ * `failed` に倒して active_period_key UNIQUE を解放する。
+ * Codex impl review HIGH #9 反映: scheduled で定期実行する。
+ */
+export async function recoverStuckPaymentJobs(
+  db: D1Database,
+  staleThresholdMinutes = 30
+): Promise<number> {
+  // started_at が staleThresholdMinutes 以上前のままの running ジョブを failed に
+  const cutoff = new Date(Date.now() - staleThresholdMinutes * 60_000).toISOString();
+  const result = await db
     .prepare(
-      `UPDATE payment_jobs SET status = 'running', started_at = ? WHERE id = ?`
+      `UPDATE payment_jobs SET status = 'failed',
+         error_message = COALESCE(error_message, 'recovered from stuck running'),
+         completed_at = ?
+       WHERE status = 'running' AND (started_at IS NULL OR started_at < ?)`
+    )
+    .bind(jstNow(), cutoff)
+    .run();
+  return (result.meta as { changes?: number }).changes ?? 0;
+}
+
+/**
+ * queued → running への遷移を条件付き UPDATE で原子化する。
+ * 複数 invocation が同時に queued を読んでも、`changes === 1` の側だけが
+ * 処理に進める（Codex impl review HIGH #8 反映）。
+ */
+export async function tryMarkPaymentJobRunning(
+  db: D1Database,
+  id: string
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE payment_jobs SET status = 'running', started_at = ?
+       WHERE id = ? AND status = 'queued'`
     )
     .bind(jstNow(), id)
     .run();
+  const changes = (result.meta as { changes?: number }).changes ?? 0;
+  return changes === 1;
+}
+
+/** 旧 API（テストやレガシー呼び出し用）。新規利用は tryMarkPaymentJobRunning を推奨 */
+export async function markPaymentJobRunning(db: D1Database, id: string): Promise<void> {
+  await tryMarkPaymentJobRunning(db, id);
 }
 
 export async function updatePaymentJobProgress(

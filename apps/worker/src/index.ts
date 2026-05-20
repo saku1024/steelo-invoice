@@ -76,13 +76,18 @@ import drivers from './routes/drivers.js';
 import driverAliases from './routes/driver-aliases.js';
 import driverDeductions from './routes/driver-deductions.js';
 import dispatchRecords from './routes/dispatch-records.js';
+import lineMessages from './routes/line-messages.js';
 import excelImports from './routes/excel-imports.js';
 import paymentSummaries from './routes/payment-summaries.js';
 import paymentJobs from './routes/payment-jobs.js';
 import auditLogs from './routes/audit-logs.js';
 import { steeloCors } from './middleware/steelo-cors.js';
 import { runPaymentJob } from './services/payment-batch-job.js';
-import { deleteExpiredImportPreviews, getQueuedPaymentJobs } from '@line-crm/db';
+import {
+  deleteExpiredImportPreviews,
+  getQueuedPaymentJobs,
+  recoverStuckPaymentJobs,
+} from '@line-crm/db';
 import { isLinkPreviewBot } from './lib/og-bot.js';
 import { buildOgHtml } from './lib/og-html.js';
 import {
@@ -120,11 +125,10 @@ export type Env = {
 
 const app = new Hono<Env>();
 
-// CORS — 既存 LINE Harness は全 origin 許可。STEELO 系の origin 限定 CORS は
-// 下の steeloCors() で対象パスにのみ適用する。
-app.use('*', cors({ origin: '*' }));
-
-// STEELO 専用 CORS（origin 許可リスト方式、Cloudflare Access の後段）
+// Codex impl review HIGH #5 反映:
+//   STEELO 専用 CORS を **グローバル CORS よりも先に** マウントする。
+//   `app.use('*', cors({ origin: '*' }))` が先に走ると preflight が
+//   全 origin 許可されて STEELO の origin 制限が効かないため。
 app.use('/api/drivers/*', steeloCors());
 app.use('/api/drivers', steeloCors());
 app.use('/api/driver-aliases/*', steeloCors());
@@ -137,7 +141,12 @@ app.use('/api/excel-imports/*', steeloCors());
 app.use('/api/excel-imports', steeloCors());
 app.use('/api/payment-summaries/*', steeloCors());
 app.use('/api/payment-summaries', steeloCors());
+app.use('/api/line-messages/*', steeloCors());
+app.use('/api/line-messages', steeloCors());
 app.use('/api/audit-logs', steeloCors());
+
+// 既存 LINE Harness は全 origin 許可（STEELO 系は上の専用 CORS で先に処理済み）
+app.use('*', cors({ origin: '*' }));
 
 // Rate limiting — runs before auth to block abuse early
 app.use('*', rateLimitMiddleware);
@@ -196,6 +205,7 @@ app.route('/', drivers);
 app.route('/', driverAliases);
 app.route('/', driverDeductions);
 app.route('/', dispatchRecords);
+app.route('/', lineMessages);
 app.route('/', excelImports);
 app.route('/', paymentJobs);
 app.route('/', paymentSummaries);
@@ -890,6 +900,16 @@ async function scheduled(
   // (planned alongside the multi-provider UI work). Keeping the service file
   // (apps/worker/src/services/duplicate-detect.ts) and the existing
   // `重複:` tag rows untouched until that replacement lands.
+
+  // STEELO Phase 1: 取り残された running ジョブを failed に倒す（recovery）
+  try {
+    const recovered = await recoverStuckPaymentJobs(env.DB, 30);
+    if (recovered > 0) {
+      console.log(`[steelo] recovered ${recovered} stuck payment job(s)`);
+    }
+  } catch (e) {
+    console.error('[steelo] payment job recovery error:', e);
+  }
 
   // STEELO Phase 1: 期限切れ import_previews を物理削除し、R2 オブジェクトも掃除
   try {

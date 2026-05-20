@@ -251,6 +251,8 @@ export type AuditAction =
   | 'driver_alias_create'
   | 'driver_alias_delete'
   | 'deduction_update'
+  | 'dispatch_create'
+  | 'dispatch_update'
   | 'import_confirm'
   | 'import_overwrite'
   | 'import_archive'

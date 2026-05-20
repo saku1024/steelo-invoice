@@ -8,8 +8,10 @@ import {
   insertSummaryLines,
   listDriverPaymentSummariesByPeriod,
   getDriverPaymentSummaryById,
+  listSummaryLines,
   type DriverPaymentSummaryRow,
 } from '@line-crm/db';
+import type { PaymentResult } from '@line-crm/shared';
 import type { DriverPaymentSummary } from '@line-crm/shared';
 import { calculatePayment } from '../services/payment-calculator.js';
 import { buildDriverExcel, makeFileName } from '../services/excel-export.js';
@@ -114,26 +116,75 @@ paymentSummaries.get('/api/payment-summaries/:id/download', async (c) => {
   try {
     const summary = await getDriverPaymentSummaryById(c.env.DB, c.req.param('id'));
     if (!summary) return c.json({ success: false, error: 'Not found' }, 404);
-    if (!summary.r2_xlsx_key || !c.env.STEELO_FILES) {
-      return c.json(
-        { success: false, error: 'xlsx not stored; regenerate via POST /generate' },
-        410
-      );
-    }
-    const obj = await c.env.STEELO_FILES.get(summary.r2_xlsx_key);
-    if (!obj) {
-      return c.json(
-        { success: false, error: 'xlsx missing on storage; regenerate via POST /generate' },
-        410
-      );
-    }
     const fileName = makeFileName(summary.period, summary.driver_name_snapshot);
-    return new Response(obj.body, {
+
+    // 1. R2 にキャッシュがあれば優先
+    if (summary.r2_xlsx_key && c.env.STEELO_FILES) {
+      const obj = await c.env.STEELO_FILES.get(summary.r2_xlsx_key);
+      if (obj) {
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            'Content-Type':
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+          },
+        });
+      }
+    }
+
+    // 2. R2 が消えていれば payment_summary_lines のスナップショットから再構築
+    //    （Codex impl review HIGH #7 反映: 現在マスタで上書き再生成せず、当時の数値で再描画）
+    const lines = await listSummaryLines(c.env.DB, summary.id);
+    if (lines.length === 0 && summary.total_fare_with_tax === 0 && summary.total_advance === 0) {
+      return c.json(
+        { success: false, error: 'snapshot is empty; cannot reconstruct' },
+        410
+      );
+    }
+    const result: PaymentResult = {
+      fareLines: lines.map((l) => ({
+        fareAfterCommission: l.fare_after_commission,
+        fareWithTax: l.fare_with_tax,
+        advance: l.advance_payment,
+        excludedFromCalc: Boolean(l.excluded_from_calc),
+      })),
+      totalFareBeforeTax: summary.total_fare_before_tax,
+      totalFareWithTax: summary.total_fare_with_tax,
+      totalAdvance: summary.total_advance,
+      vehicleCost: summary.vehicle_cost,
+      processingFee: summary.processing_fee,
+      prepayment: summary.prepayment,
+      finalAmount: summary.final_amount,
+    };
+    const bytes = buildDriverExcel({
+      driver: {
+        name: summary.driver_name_snapshot,
+        hasInvoice: Boolean(summary.has_invoice_snapshot),
+      },
+      period: summary.period,
+      records: lines.map((l) => ({
+        workDay: l.work_day,
+        dayOfWeek: null,
+        taskName: l.task_name,
+        pickupLocation: null,
+        deliveryLocation: null,
+        startTime: null,
+        endTime: null,
+        distanceKm: null,
+        advancePayment: l.advance_payment,
+        fare: l.fare,
+        notes: null,
+      })),
+      result,
+    });
+    return new Response(bytes, {
       status: 200,
       headers: {
         'Content-Type':
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+        'X-Reconstructed-From-Snapshot': '1',
       },
     });
   } catch (err) {

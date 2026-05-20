@@ -6,7 +6,6 @@
 //   3. 各 xlsx を R2 に PUT
 //   4. 全件完了後に ZIP 化して R2 に PUT
 //   5. payment_jobs を completed に更新（または failed）
-import { gzipSync } from 'node:zlib';
 import {
   listDrivers,
   getConfirmedBatchByPeriod,
@@ -14,7 +13,7 @@ import {
   listClientRecordsByDriverPeriod,
   upsertDriverPaymentSummary,
   insertSummaryLines,
-  markPaymentJobRunning,
+  tryMarkPaymentJobRunning,
   updatePaymentJobProgress,
   markPaymentJobCompleted,
   markPaymentJobFailed,
@@ -24,8 +23,6 @@ import { calculatePayment } from './payment-calculator.js';
 import { buildDriverExcel, makeFileName } from './excel-export.js';
 import { recordSystemAudit } from './audit.js';
 import type { Env } from '../index.js';
-
-void gzipSync; // 未使用警告抑止（将来 ZIP 内で使う余地）
 
 interface JszipLike {
   file(name: string, data: Uint8Array): JszipLike;
@@ -150,7 +147,13 @@ export async function runPaymentJob(env: Env['Bindings'], jobId: string): Promis
     console.warn(`[payment-batch-job] job ${jobId} status=${job.status}, skipping`);
     return;
   }
-  await markPaymentJobRunning(env.DB, jobId);
+  // 二重実行防止: 条件付き UPDATE が 1 行影響していなければ
+  // 他 invocation が既に処理を始めているので何もしない
+  const claimed = await tryMarkPaymentJobRunning(env.DB, jobId);
+  if (!claimed) {
+    console.warn(`[payment-batch-job] job ${jobId} already claimed by another invocation`);
+    return;
+  }
 
   try {
     const batch = await getConfirmedBatchByPeriod(env.DB, job.period);

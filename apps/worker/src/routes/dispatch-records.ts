@@ -7,6 +7,7 @@ import {
   type DispatchRecordRow,
 } from '@line-crm/db';
 import type { DispatchRecord } from '@line-crm/shared';
+import { recordAudit } from '../services/audit.js';
 import type { Env } from '../index.js';
 
 const dispatchRecords = new Hono<Env>();
@@ -68,6 +69,12 @@ dispatchRecords.post('/api/dispatch-records', async (c) => {
       managementNumber: (body.managementNumber as string) ?? null,
       rawMessageId: (body.rawMessageId as string) ?? null,
     });
+    await recordAudit(c.env.DB, c, {
+      action: 'dispatch_create',
+      resourceType: 'dispatch_record',
+      resourceId: row.id,
+      payload: { driverId: row.driver_id, workDate: row.work_date, taskName: row.task_name },
+    });
     return c.json({ success: true, data: serialize(row) }, 201);
   } catch (err) {
     console.error('POST /api/dispatch-records error:', err);
@@ -83,6 +90,15 @@ dispatchRecords.patch('/api/dispatch-records/:id', async (c) => {
     const body = await c.req.json<Record<string, unknown>>();
     const updated = await updateDispatchRecord(c.env.DB, id, body);
     if (!updated) return c.json({ success: false, error: 'Not found' }, 404);
+    await recordAudit(c.env.DB, c, {
+      action: 'dispatch_update',
+      resourceType: 'dispatch_record',
+      resourceId: id,
+      payload: {
+        changedKeys: Object.keys(body),
+        before: { workDate: before.work_date, taskName: before.task_name },
+      },
+    });
     return c.json({ success: true, data: serialize(updated) });
   } catch (err) {
     console.error('PATCH /api/dispatch-records/:id error:', err);

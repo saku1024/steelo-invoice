@@ -53,18 +53,19 @@ drivers.get('/api/drivers/:id', async (c) => {
 
 drivers.post('/api/drivers', async (c) => {
   try {
-    const body = await c.req.json<Partial<Driver>>();
-    if (!body.name || typeof body.name !== 'string' || body.name.trim() === '') {
+    const body = await c.req.json<Record<string, unknown>>();
+    if (typeof body.name !== 'string' || body.name.trim() === '') {
       return c.json({ success: false, error: 'name is required' }, 400);
     }
+    // boolean 系は文字列 'false' を true 扱いしない
     const created = await createDriver(c.env.DB, {
-      name: body.name.trim(),
-      nameKana: body.nameKana ?? null,
-      lineGroupId: body.lineGroupId ?? null,
-      lineGroupName: body.lineGroupName ?? null,
-      hasInvoice: body.hasInvoice ?? false,
-      isActive: body.isActive ?? true,
-      notes: body.notes ?? null,
+      name: (body.name as string).trim(),
+      nameKana: optString(body.nameKana),
+      lineGroupId: optString(body.lineGroupId),
+      lineGroupName: optString(body.lineGroupName),
+      hasInvoice: asBool(body.hasInvoice, false),
+      isActive: asBool(body.isActive, true),
+      notes: optString(body.notes),
     });
     await recordAudit(c.env.DB, c, {
       action: 'driver_create',
@@ -88,17 +89,17 @@ drivers.post('/api/drivers', async (c) => {
 drivers.patch('/api/drivers/:id', async (c) => {
   try {
     const id = c.req.param('id');
-    const body = await c.req.json<Partial<Driver>>();
+    const body = await c.req.json<Record<string, unknown>>();
     const before = await getDriverById(c.env.DB, id);
     if (!before) return c.json({ success: false, error: 'Not found' }, 404);
     const updated = await updateDriver(c.env.DB, id, {
-      name: body.name,
-      nameKana: body.nameKana,
-      lineGroupId: body.lineGroupId,
-      lineGroupName: body.lineGroupName,
-      hasInvoice: body.hasInvoice,
-      isActive: body.isActive,
-      notes: body.notes,
+      name: typeof body.name === 'string' ? body.name : undefined,
+      nameKana: 'nameKana' in body ? optString(body.nameKana) : undefined,
+      lineGroupId: 'lineGroupId' in body ? optString(body.lineGroupId) : undefined,
+      lineGroupName: 'lineGroupName' in body ? optString(body.lineGroupName) : undefined,
+      hasInvoice: 'hasInvoice' in body ? asBool(body.hasInvoice, false) : undefined,
+      isActive: 'isActive' in body ? asBool(body.isActive, true) : undefined,
+      notes: 'notes' in body ? optString(body.notes) : undefined,
     });
     if (!updated) return c.json({ success: false, error: 'Not found' }, 404);
     await recordAudit(c.env.DB, c, {
@@ -137,5 +138,22 @@ drivers.delete('/api/drivers/:id', async (c) => {
     return c.json({ success: false, error: 'Internal server error' }, 500);
   }
 });
+
+function optString(v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  return t === '' ? null : t;
+}
+
+function asBool(v: unknown, fallback: boolean): boolean {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') {
+    if (v === 'true' || v === '1') return true;
+    if (v === 'false' || v === '0' || v === '') return false;
+  }
+  return fallback;
+}
 
 export default drivers;

@@ -198,6 +198,18 @@ export interface ConfirmImportBatchInput {
   confirmedBy: string;
   rows: ClientRecordInput[];
   overwrite: boolean;
+  /**
+   * confirm/overwrite を行ったことを audit_logs に記録するためのコンテキスト。
+   * confirmImportBatch は最後の status='confirmed' UPDATE と一緒に
+   * D1 batch で書き込む（Codex impl review MEDIUM #11 反映）。
+   * 省略時は audit を書かない（ルート側で呼んでも良いが trans 跨ぎになる）。
+   */
+  audit?: {
+    actorId: string;
+    actorName: string;
+    ip: string | null;
+    userAgent: string | null;
+  };
 }
 
 export interface ClientRecordInput {
@@ -217,20 +229,21 @@ export interface ClientRecordInput {
 }
 
 /**
- * 確定処理を原子的に実行する。
+ * 確定処理を原子化された手順で実行する。
  *
- *   1. 既存 confirmed の有無を確認
- *      - あり + overwrite=false → ConfirmedBatchAlreadyExistsError を throw
- *      - あり + overwrite=true → 既存を status='archived' に変更
- *   2. 新規 batch を status='confirmed' で INSERT（generated column UNIQUE が
- *      並行 confirm 時の競合を防ぐ）
- *   3. client_records を 50 行刻みで INSERT（D1 のパラメータ100制約に配慮）
- *   4. 旧バッチ ID と新バッチ ID を返す（呼び出し側で audit_logs を書く）
+ * Codex impl review CRITICAL #2/#3 反映:
+ *   旧来は「旧 confirmed → archived → 新 confirmed INSERT → client_records INSERT」
+ *   の順で実行し、途中失敗時に「period に有効な confirmed が無い」状態や
+ *   「行欠損の confirmed バッチが残る」状態が起きえた。新フローは:
  *
- * 注: D1 はマルチステートメントのトランザクションを batch() API でしか提供しないが、
- * UNIQUE 制約による排他で並行 confirm の整合性は守られる。途中で失敗した場合は
- * 未完了の client_records が残るが、batch.status は pending/archived のままなので
- * 集計には影響しない（cleanup は運用で対応）。
+ *   1. 新バッチを **pending** で INSERT
+ *   2. client_records を全件 INSERT（途中失敗時は pending のまま残るが、
+ *      集計対象（status='confirmed'）からは外れるので支払計算に影響しない）
+ *   3. 旧 confirmed を archived に、新 pending を confirmed に **同一 batch** で更新
+ *      → generated column UNIQUE による並行排他は最後の UPDATE 時点でも効く
+ *
+ * 並行 confirm でも、最後の UPDATE 時に period_confirmed_key 衝突で UNIQUE 違反となり
+ * 後勝ちが避けられる。
  */
 export async function confirmImportBatch(
   db: D1Database,
@@ -243,52 +256,109 @@ export async function confirmImportBatch(
       throw new ConfirmedBatchAlreadyExistsError(input.period, existing.id);
     }
     archivedBatchId = existing.id;
-    await db
-      .prepare(
-        `UPDATE import_batches SET status = 'archived' WHERE id = ?`
-      )
-      .bind(existing.id)
-      .run();
   }
+
   const id = crypto.randomUUID();
   const now = jstNow();
+
+  // 1. 新バッチを pending で INSERT
+  await db
+    .prepare(
+      `INSERT INTO import_batches
+       (id, period, file_name, total_records, total_fare, total_advance,
+        header_vehicle_cost, header_processing_fee, header_prepayment,
+        commission_rate, tax_rate, template_version, status,
+        imported_at, confirmed_at, confirmed_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL)`
+    )
+    .bind(
+      id,
+      input.period,
+      input.fileName,
+      input.totalRecords,
+      input.totalFare,
+      input.totalAdvance,
+      input.headerVehicleCost,
+      input.headerProcessingFee,
+      input.headerPrepayment,
+      input.commissionRate,
+      input.taxRate,
+      input.templateVersion,
+      now
+    )
+    .run();
+
+  // 2. client_records を全件 INSERT
   try {
-    await db
-      .prepare(
-        `INSERT INTO import_batches
-         (id, period, file_name, total_records, total_fare, total_advance,
-          header_vehicle_cost, header_processing_fee, header_prepayment,
-          commission_rate, tax_rate, template_version, status,
-          imported_at, confirmed_at, confirmed_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?)`
-      )
-      .bind(
-        id,
-        input.period,
-        input.fileName,
-        input.totalRecords,
-        input.totalFare,
-        input.totalAdvance,
-        input.headerVehicleCost,
-        input.headerProcessingFee,
-        input.headerPrepayment,
-        input.commissionRate,
-        input.taxRate,
-        input.templateVersion,
-        now,
-        now,
-        input.confirmedBy
-      )
-      .run();
+    await insertClientRecords(db, id, input.period, input.rows);
   } catch (e) {
-    // 並行 confirm: 上の overwrite 分岐を抜けてもまだ別 worker が confirmed を
-    // 入れることがある（generated column UNIQUE で2件目を弾く）
-    if (e instanceof Error && /UNIQUE/i.test(e.message)) {
-      throw new ConfirmedBatchAlreadyExistsError(input.period, '<concurrent>');
+    // 失敗時は pending バッチを掃除する
+    try {
+      await db.prepare(`DELETE FROM import_batches WHERE id = ?`).bind(id).run();
+    } catch {
+      /* ignore cleanup error */
     }
     throw e;
   }
-  await insertClientRecords(db, id, input.period, input.rows);
+
+  // 3. 旧 archived + 新 confirmed + audit_logs を D1 batch() で同時実行
+  const stmts: D1PreparedStatement[] = [];
+  if (existing) {
+    stmts.push(
+      db
+        .prepare(`UPDATE import_batches SET status = 'archived' WHERE id = ?`)
+        .bind(existing.id)
+    );
+  }
+  stmts.push(
+    db
+      .prepare(
+        `UPDATE import_batches SET status = 'confirmed',
+           confirmed_at = ?, confirmed_by = ? WHERE id = ?`
+      )
+      .bind(now, input.confirmedBy, id)
+  );
+  if (input.audit) {
+    const auditAction = existing ? 'import_overwrite' : 'import_confirm';
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO audit_logs
+             (id, actor_id, actor_name, action, resource_type, resource_id,
+              payload_json, ip, user_agent)
+             VALUES (?, ?, ?, ?, 'import_batch', ?, ?, ?, ?)`
+        )
+        .bind(
+          crypto.randomUUID(),
+          input.audit.actorId,
+          input.audit.actorName,
+          auditAction,
+          id,
+          JSON.stringify({
+            period: input.period,
+            archived: archivedBatchId,
+            rowCount: input.rows.length,
+          }),
+          input.audit.ip,
+          input.audit.userAgent
+        )
+    );
+  }
+  try {
+    await db.batch(stmts);
+  } catch (e) {
+    // 並行 confirm 等で UNIQUE 違反 → pending バッチと client_records を掃除
+    try {
+      await db.prepare(`DELETE FROM client_records WHERE import_batch_id = ?`).bind(id).run();
+      await db.prepare(`DELETE FROM import_batches WHERE id = ?`).bind(id).run();
+    } catch {
+      /* ignore */
+    }
+    if (e instanceof Error && /UNIQUE/i.test(e.message)) {
+      throw new ConfirmedBatchAlreadyExistsError(input.period, existing?.id ?? '<concurrent>');
+    }
+    throw e;
+  }
   return { batchId: id, archivedBatchId };
 }
 

@@ -57,6 +57,61 @@ export function validateXlsxBuffer(buffer: ArrayBuffer): void {
   if (!(bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04)) {
     throw new ExcelValidationError('NOT_XLSX', 'invalid xlsx magic bytes');
   }
+  // Codex impl review HIGH #10 反映: ZIP central directory を直接スキャンして
+  // sharedStrings.xml の size / 外部リンク / OLE オブジェクト / 埋込み等を検出する
+  scanZipEntries(buffer);
+}
+
+/**
+ * ZIP の central directory を走査し、危険なエントリの有無とサイズを早期検証する。
+ * SheetJS パース前に呼ぶことで、巨大 sharedStrings や OLE 埋込みを通さない。
+ */
+function scanZipEntries(buffer: ArrayBuffer): void {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  // End of central directory signature 0x06054b50 を後ろから探す
+  let eocdOffset = -1;
+  for (let i = buffer.byteLength - 22; i >= Math.max(0, buffer.byteLength - 65557); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  if (eocdOffset < 0) {
+    throw new ExcelValidationError('NOT_XLSX', 'EOCD not found');
+  }
+  const totalEntries = view.getUint16(eocdOffset + 10, true);
+  const cdOffset = view.getUint32(eocdOffset + 16, true);
+  let p = cdOffset;
+  for (let i = 0; i < totalEntries; i++) {
+    if (view.getUint32(p, true) !== 0x02014b50) break;
+    const compressed = view.getUint32(p + 20, true);
+    const uncompressed = view.getUint32(p + 24, true);
+    const nameLen = view.getUint16(p + 28, true);
+    const extraLen = view.getUint16(p + 30, true);
+    const commentLen = view.getUint16(p + 32, true);
+    const name = new TextDecoder('utf-8').decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    void compressed;
+    // sharedStrings サイズ上限
+    if (name === 'xl/sharedStrings.xml' && uncompressed > XLSX_LIMITS.maxSharedStringsBytes) {
+      throw new ExcelValidationError(
+        'SHARED_STRINGS_TOO_LARGE',
+        `sharedStrings.xml ${uncompressed} bytes exceeds limit ${XLSX_LIMITS.maxSharedStringsBytes}`
+      );
+    }
+    // 外部リンク
+    if (/^xl\/externalLinks\//.test(name)) {
+      throw new ExcelValidationError(
+        'EXTERNAL_LINK_NOT_ALLOWED',
+        `external link entry detected: ${name}`
+      );
+    }
+    // OLE / 埋込み
+    if (/^xl\/embeddings\//.test(name) || /\/oleObject/i.test(name)) {
+      throw new ExcelValidationError('OLE_NOT_ALLOWED', `embedded/OLE entry: ${name}`);
+    }
+    p += 46 + nameLen + extraLen + commentLen;
+  }
 }
 
 export interface ParsedHeader {
@@ -97,9 +152,11 @@ export function parseExcel(buffer: ArrayBuffer): ParsedExcel {
 
   let wb: XLSX.WorkBook;
   try {
+    // Codex impl review HIGH #10 反映: cellFormula:true で読み込んでフォーミュラ存在を
+    // 確実に検出できるようにする（false だと cell.f は欠落するため見逃す）
     wb = XLSX.read(new Uint8Array(buffer), {
       type: 'array',
-      cellFormula: false,
+      cellFormula: true,
       cellHTML: false,
       cellNF: false,
       sheetStubs: false,
@@ -225,7 +282,10 @@ function extractHeader(aoa: unknown[][], warnings: string[]): ParsedHeader {
   const periodRaw = found.period;
   let period: string | null = null;
   if (typeof periodRaw === 'string') {
-    const m = periodRaw.match(/(\d{4})[-/](\d{1,2})/);
+    // Codex impl review MEDIUM #14 反映: 日本語表記 "2026年5月" にも対応
+    const m1 = periodRaw.match(/(\d{4})[-/](\d{1,2})/);
+    const m2 = periodRaw.match(/(\d{4})年\s*(\d{1,2})月/);
+    const m = m1 ?? m2;
     if (m) period = `${m[1]}-${m[2].padStart(2, '0')}`;
   } else if (periodRaw instanceof Date) {
     period = `${periodRaw.getFullYear()}-${String(periodRaw.getMonth() + 1).padStart(2, '0')}`;
@@ -258,11 +318,31 @@ function extractHeader(aoa: unknown[][], warnings: string[]): ParsedHeader {
     headerVehicleCost: numOrZero(found.headerVehicleCost, 'headerVehicleCost', warnings),
     headerProcessingFee: numOrZero(found.headerProcessingFee, 'headerProcessingFee', warnings),
     headerPrepayment: numOrZero(found.headerPrepayment, 'headerPrepayment', warnings),
-    commissionRate:
-      typeof found.commissionRate === 'number' ? found.commissionRate : 0.075,
-    taxRate: typeof found.taxRate === 'number' ? found.taxRate : 0.1,
+    commissionRate: parseRate(found.commissionRate, 0.075),
+    taxRate: parseRate(found.taxRate, 0.1),
     templateVersion,
   };
+}
+
+/**
+ * 率（手数料率・税率）を正規化する。Codex impl review MEDIUM #13 反映:
+ *   - 0.075 / 7.5 / "7.5%" / "0.075" / "7.5 %" 等を 0〜1 の小数に変換
+ *   - 範囲外（負・1以上）はデフォルトにフォールバック
+ */
+function parseRate(v: unknown, fallback: number): number {
+  let n: number | null = null;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'string') {
+    const trimmed = v.trim().replace(/\s/g, '');
+    const isPercent = trimmed.endsWith('%');
+    const num = Number(trimmed.replace('%', ''));
+    if (!Number.isNaN(num)) n = isPercent ? num / 100 : num;
+  }
+  if (n === null || Number.isNaN(n)) return fallback;
+  // 1 以上は百分率表記とみなす（7.5 → 0.075）
+  if (n >= 1 && n < 100) return n / 100;
+  if (n < 0 || n >= 1) return fallback;
+  return n;
 }
 
 function findNeighborValue(aoa: unknown[][], r: number, c: number): unknown {
@@ -379,8 +459,13 @@ function extractRows(aoa: unknown[][], warnings: string[]): ParsedRow[] {
     if (!isMainRow) continue;
 
     const fareValue = parseFare(fareCell);
+    const workDay = parseWorkDay(workDayCell);
+    if (workDay === null) {
+      warnings.push(`row ${r + 1}: workDay invalid (${String(workDayCell)}), skipping`);
+      continue;
+    }
     out.push({
-      workDay: Number(workDayCell ?? 0),
+      workDay,
       dayOfWeek:
         colMap.dayOfWeek !== undefined ? toStr(row[colMap.dayOfWeek]) : null,
       taskName:
@@ -404,6 +489,25 @@ function extractRows(aoa: unknown[][], warnings: string[]): ParsedRow[] {
     });
   }
   return out;
+}
+
+/**
+ * "1日" や "  3 " のような表記も含めて 1-31 の整数に正規化する。
+ * Codex impl review MEDIUM #16 反映。
+ */
+function parseWorkDay(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const n = Math.round(v);
+    return n >= 1 && n <= 31 ? n : null;
+  }
+  if (typeof v === 'string') {
+    const m = v.replace(/[\s日]/g, '').match(/^(\d{1,2})$/);
+    if (m) {
+      const n = Number(m[1]);
+      return n >= 1 && n <= 31 ? n : null;
+    }
+  }
+  return null;
 }
 
 function parseFare(v: unknown): number | null {
