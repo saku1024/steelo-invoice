@@ -30,6 +30,21 @@ interface JszipLike {
 }
 
 /**
+ * R2 消失時にスナップショットから再構築した xlsx 群を ZIP に固める。
+ * payment-jobs route の fallback ダウンロード経路から呼ばれる
+ * （Codex verify HIGH #2 反映）。
+ */
+export async function rebuildZipFromSnapshot(
+  files: { name: string; bytes: Uint8Array }[]
+): Promise<Uint8Array> {
+  const zip = createZip();
+  for (const f of files) {
+    zip.file(f.name, f.bytes);
+  }
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+/**
  * 軽量 ZIP 実装（STORE 方式、無圧縮）。Workers 環境で jszip の依存を増やさず
  * 単一ファイルから ZIP を組み立てるための最小実装。圧縮率は xlsx 自体が
  * 既に zip 圧縮されているため STORE で十分。

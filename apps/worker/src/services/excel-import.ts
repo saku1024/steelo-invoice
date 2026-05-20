@@ -461,8 +461,12 @@ function extractRows(aoa: unknown[][], warnings: string[]): ParsedRow[] {
     const fareValue = parseFare(fareCell);
     const workDay = parseWorkDay(workDayCell);
     if (workDay === null) {
-      warnings.push(`row ${r + 1}: workDay invalid (${String(workDayCell)}), skipping`);
-      continue;
+      // Codex verify MEDIUM #3 反映: 不正 workDay は silently skip せず confirm を止める
+      throw new ExcelValidationError(
+        'PARSE_ERROR',
+        `row ${r + 1}: workDay must be integer 1-31 (got ${JSON.stringify(workDayCell)})`,
+        { row: r + 1, value: workDayCell }
+      );
     }
     out.push({
       workDay,

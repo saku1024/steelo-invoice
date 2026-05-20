@@ -5,6 +5,7 @@ import {
   type LineMessageRow,
 } from '@line-crm/db';
 import type { LineMessage } from '@line-crm/shared';
+import { clampLimit, clampOffset } from '../services/validation.js';
 import type { Env } from '../index.js';
 
 const lineMessages = new Hono<Env>();
@@ -28,16 +29,14 @@ function serialize(r: LineMessageRow): LineMessage {
 
 lineMessages.get('/api/line-messages', async (c) => {
   try {
-    const limitRaw = c.req.query('limit');
-    const offsetRaw = c.req.query('offset');
     const result = await listLineMessages(c.env.DB, {
       driverId: c.req.query('driver_id') ?? undefined,
       groupId: c.req.query('group_id') ?? undefined,
       from: c.req.query('from') ?? undefined,
       to: c.req.query('to') ?? undefined,
       messageType: c.req.query('type') ?? undefined,
-      limit: limitRaw ? Number(limitRaw) : undefined,
-      offset: offsetRaw ? Number(offsetRaw) : undefined,
+      limit: clampLimit(c.req.query('limit'), 50, 200),
+      offset: clampOffset(c.req.query('offset')),
     });
     return c.json({
       success: true,

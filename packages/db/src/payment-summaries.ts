@@ -180,6 +180,20 @@ export async function getDriverPaymentSummaryById(
     .first<DriverPaymentSummaryRow>();
 }
 
+export async function listDriverPaymentSummariesByJobId(
+  db: D1Database,
+  jobId: string
+): Promise<DriverPaymentSummaryRow[]> {
+  const r = await db
+    .prepare(
+      `SELECT * FROM driver_payment_summaries WHERE payment_job_id = ?
+       ORDER BY driver_name_snapshot ASC`
+    )
+    .bind(jobId)
+    .all<DriverPaymentSummaryRow>();
+  return r.results;
+}
+
 export async function listDriverPaymentSummariesByPeriod(
   db: D1Database,
   period: string
@@ -330,24 +344,44 @@ export async function getQueuedPaymentJobs(
 /**
  * `running` で長時間動いていない（worker クラッシュ等で取り残された）ジョブを
  * `failed` に倒して active_period_key UNIQUE を解放する。
- * Codex impl review HIGH #9 反映: scheduled で定期実行する。
+ * Codex impl review HIGH #9 反映 / verify HIGH #1 反映:
+ *   started_at は `+09:00` 形式で保存されているため、SQL の文字列比較では
+ *   `Z` 形式 cutoff と整合しない。SELECT で取得後 JS 側で epoch 比較する。
  */
 export async function recoverStuckPaymentJobs(
   db: D1Database,
   staleThresholdMinutes = 30
 ): Promise<number> {
-  // started_at が staleThresholdMinutes 以上前のままの running ジョブを failed に
-  const cutoff = new Date(Date.now() - staleThresholdMinutes * 60_000).toISOString();
-  const result = await db
-    .prepare(
-      `UPDATE payment_jobs SET status = 'failed',
-         error_message = COALESCE(error_message, 'recovered from stuck running'),
-         completed_at = ?
-       WHERE status = 'running' AND (started_at IS NULL OR started_at < ?)`
-    )
-    .bind(jstNow(), cutoff)
-    .run();
-  return (result.meta as { changes?: number }).changes ?? 0;
+  const cutoffMs = Date.now() - staleThresholdMinutes * 60_000;
+  // started_at が null（running 化前に落ちた）or 古いものを候補にする
+  const r = await db
+    .prepare(`SELECT id, started_at FROM payment_jobs WHERE status = 'running'`)
+    .all<{ id: string; started_at: string | null }>();
+  const stuck: string[] = [];
+  for (const row of r.results) {
+    if (!row.started_at) {
+      stuck.push(row.id);
+      continue;
+    }
+    const t = new Date(row.started_at).getTime();
+    if (!Number.isNaN(t) && t < cutoffMs) {
+      stuck.push(row.id);
+    }
+  }
+  if (stuck.length === 0) return 0;
+  const now = jstNow();
+  const stmts = stuck.map((id) =>
+    db
+      .prepare(
+        `UPDATE payment_jobs SET status = 'failed',
+           error_message = COALESCE(error_message, 'recovered from stuck running'),
+           completed_at = ?
+         WHERE id = ? AND status = 'running'`
+      )
+      .bind(now, id)
+  );
+  await db.batch(stmts);
+  return stuck.length;
 }
 
 /**

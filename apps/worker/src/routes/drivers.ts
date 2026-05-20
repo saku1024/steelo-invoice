@@ -92,8 +92,16 @@ drivers.patch('/api/drivers/:id', async (c) => {
     const body = await c.req.json<Record<string, unknown>>();
     const before = await getDriverById(c.env.DB, id);
     if (!before) return c.json({ success: false, error: 'Not found' }, 404);
+    // Codex verify MEDIUM #4 反映: patch でも name は trim 後の非空チェック
+    let nextName: string | undefined;
+    if ('name' in body) {
+      if (typeof body.name !== 'string' || body.name.trim() === '') {
+        return c.json({ success: false, error: 'name cannot be empty' }, 400);
+      }
+      nextName = body.name.trim();
+    }
     const updated = await updateDriver(c.env.DB, id, {
-      name: typeof body.name === 'string' ? body.name : undefined,
+      name: nextName,
       nameKana: 'nameKana' in body ? optString(body.nameKana) : undefined,
       lineGroupId: 'lineGroupId' in body ? optString(body.lineGroupId) : undefined,
       lineGroupName: 'lineGroupName' in body ? optString(body.lineGroupName) : undefined,

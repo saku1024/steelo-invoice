@@ -4,12 +4,15 @@ import {
   getPaymentJobById,
   listDrivers,
   getConfirmedBatchByPeriod,
+  listDriverPaymentSummariesByJobId,
+  listSummaryLines,
   ActiveJobAlreadyExistsError,
   type PaymentJobRow,
 } from '@line-crm/db';
-import type { PaymentJob } from '@line-crm/shared';
+import type { PaymentJob, PaymentResult } from '@line-crm/shared';
 import { safeAudit } from '../services/audit.js';
-import { runPaymentJob } from '../services/payment-batch-job.js';
+import { runPaymentJob, rebuildZipFromSnapshot } from '../services/payment-batch-job.js';
+import { buildDriverExcel, makeFileName } from '../services/excel-export.js';
 import type { Env } from '../index.js';
 
 const paymentJobs = new Hono<Env>();
@@ -103,21 +106,82 @@ paymentJobs.get('/api/payment-summaries/jobs/:id/download', async (c) => {
   try {
     const job = await getPaymentJobById(c.env.DB, c.req.param('id'));
     if (!job) return c.json({ success: false, error: 'Not found' }, 404);
-    if (job.status !== 'completed' || !job.r2_zip_key) {
+    if (job.status !== 'completed') {
       return c.json({ success: false, error: 'job not completed' }, 409);
     }
-    if (!c.env.STEELO_FILES) {
-      return c.json({ success: false, error: 'storage not configured' }, 500);
+    const filename = `${job.period}_payment_summaries.zip`;
+
+    // 1. R2 にキャッシュがあれば優先
+    if (job.r2_zip_key && c.env.STEELO_FILES) {
+      const obj = await c.env.STEELO_FILES.get(job.r2_zip_key);
+      if (obj) {
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${filename}"`,
+          },
+        });
+      }
     }
-    const obj = await c.env.STEELO_FILES.get(job.r2_zip_key);
-    if (!obj) {
-      return c.json({ success: false, error: 'zip missing on storage' }, 410);
+
+    // 2. R2 が消えていれば payment_summary_lines のスナップショットから再構築
+    //    （Codex verify HIGH #2 反映: 個別 xlsx と同じく、当時のスナップショットから ZIP を組み直す）
+    const summaries = await listDriverPaymentSummariesByJobId(c.env.DB, job.id);
+    if (summaries.length === 0) {
+      return c.json({ success: false, error: 'no snapshot available to reconstruct' }, 410);
     }
-    return new Response(obj.body, {
+    const files: { name: string; bytes: Uint8Array }[] = [];
+    for (const summary of summaries) {
+      const lines = await listSummaryLines(c.env.DB, summary.id);
+      const result: PaymentResult = {
+        fareLines: lines.map((l) => ({
+          fareAfterCommission: l.fare_after_commission,
+          fareWithTax: l.fare_with_tax,
+          advance: l.advance_payment,
+          excludedFromCalc: Boolean(l.excluded_from_calc),
+        })),
+        totalFareBeforeTax: summary.total_fare_before_tax,
+        totalFareWithTax: summary.total_fare_with_tax,
+        totalAdvance: summary.total_advance,
+        vehicleCost: summary.vehicle_cost,
+        processingFee: summary.processing_fee,
+        prepayment: summary.prepayment,
+        finalAmount: summary.final_amount,
+      };
+      const xlsx = buildDriverExcel({
+        driver: {
+          name: summary.driver_name_snapshot,
+          hasInvoice: Boolean(summary.has_invoice_snapshot),
+        },
+        period: summary.period,
+        records: lines.map((l) => ({
+          workDay: l.work_day,
+          dayOfWeek: null,
+          taskName: l.task_name,
+          pickupLocation: null,
+          deliveryLocation: null,
+          startTime: null,
+          endTime: null,
+          distanceKm: null,
+          advancePayment: l.advance_payment,
+          fare: l.fare,
+          notes: null,
+        })),
+        result,
+      });
+      files.push({
+        name: makeFileName(summary.period, summary.driver_name_snapshot),
+        bytes: xlsx,
+      });
+    }
+    const zipBytes = await rebuildZipFromSnapshot(files);
+    return new Response(zipBytes, {
       status: 200,
       headers: {
         'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${job.period}_payment_summaries.zip"`,
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'X-Reconstructed-From-Snapshot': '1',
       },
     });
   } catch (err) {
