@@ -32,6 +32,8 @@ export * from './rich-menus';
 export * from './drivers';
 export * from './driver-deductions';
 export * from './line-messages';
+export * from './dispatch-records';
+export * from './import-batches';
 
 /**
  * Thin wrapper around D1Database.
