@@ -28,6 +28,10 @@ export * from './auto-replies';
 export * from './traffic-pools';
 export * from './message-templates';
 export * from './rich-menus';
+// STEELO Phase 1
+export * from './drivers';
+export * from './driver-deductions';
+export * from './line-messages';
 
 /**
  * Thin wrapper around D1Database.

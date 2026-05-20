@@ -2,6 +2,10 @@ import { Hono } from 'hono';
 import { verifySignature, LineClient } from '@line-crm/line-sdk';
 import type { WebhookRequestBody, WebhookEvent, TextEventMessage } from '@line-crm/line-sdk';
 import {
+  handleGroupMessage,
+  isGroupMessageEvent,
+} from '../services/group-message-handler.js';
+import {
   upsertFriend,
   updateFriendFollowStatus,
   getFriendByLineUserId,
@@ -123,6 +127,12 @@ webhook.post('/webhook', async (c) => {
   const processingPromise = (async () => {
     for (const event of body.events) {
       try {
+        // STEELO Phase 1 F1: グループメッセージは line_messages に蓄積し、
+        // 既存の friend/scenario 系処理はスキップする（個別チャットと別フロー）
+        if (isGroupMessageEvent(event)) {
+          await handleGroupMessage(db, event);
+          continue;
+        }
         await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin, c.env.LIFF_URL, c.env.IMAGES);
       } catch (err) {
         console.error('Error handling webhook event:', err);
