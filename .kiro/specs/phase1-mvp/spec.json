@@ -1,0 +1,23 @@
+{
+  "feature_name": "phase1-mvp",
+  "created_at": "2026-05-20T00:00:00+09:00",
+  "updated_at": "2026-05-20T00:00:00+09:00",
+  "language": "ja",
+  "phase": "design-generated",
+  "approvals": {
+    "requirements": {
+      "generated": true,
+      "approved": true
+    },
+    "design": {
+      "generated": true,
+      "approved": false
+    },
+    "tasks": {
+      "generated": false,
+      "approved": false
+    }
+  },
+  "ready_for_implementation": false,
+  "description": "STEELO 稼働照合・ドライバー支払明細システムの Phase 1 MVP。F1: LINEメッセージ受信・蓄積、F3: 元請けExcelインポート、F5: 管理画面（基本CRUD）、F6: ドライバー支払明細Excel出力 をスコープとする。F2/F4（Claude Haiku解析・自動照合）は Phase 2 に分離。"
+}
