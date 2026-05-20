@@ -13,10 +13,32 @@ import type { Env } from '../index.js';
  * 適用ルート:
  *   /api/(drivers|driver-aliases|driver-deductions|excel-imports|payment-summaries|audit-logs)*
  */
+/**
+ * Hono の `app.use('*', cors({ origin: '*' }))` を STEELO 系パスでは
+ * 適用しないようにするためのパスプレフィックス。
+ * 既存 LINE Harness のグローバル CORS は STEELO の origin 制限を上書き
+ * してしまうので、グローバル CORS 側でこのプレフィックスを skip する。
+ */
+export const STEELO_PATH_PREFIXES = [
+  '/api/drivers',
+  '/api/driver-aliases',
+  '/api/driver-deductions',
+  '/api/dispatch-records',
+  '/api/excel-imports',
+  '/api/payment-summaries',
+  '/api/line-messages',
+  '/api/audit-logs',
+] as const;
+
+export function isSteeloPath(pathname: string): boolean {
+  return STEELO_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
+}
+
 export function steeloCors() {
   return async (c: Context<Env>, next: Next): Promise<Response | void> => {
     const origin = c.req.header('Origin') ?? '';
     const allowed = parseAllowedOrigins(c.env.STEELO_WEB_ORIGINS);
+    const method = c.req.method;
 
     // Same-origin / non-CORS（Origin ヘッダなし）はそのまま通す
     if (!origin) {
@@ -24,14 +46,22 @@ export function steeloCors() {
     }
 
     if (!allowed.has(origin)) {
-      return c.json(
-        { success: false, error: 'Forbidden: origin not allowed' },
-        403
+      // 既存グローバル cors() がこの応答を上書きしないよう、
+      // ここで明示的に Vary: Origin を設定し short-circuit する。
+      return new Response(
+        JSON.stringify({ success: false, error: 'Forbidden: origin not allowed' }),
+        {
+          status: 403,
+          headers: {
+            'Content-Type': 'application/json',
+            Vary: 'Origin',
+          },
+        }
       );
     }
 
     // Preflight
-    if (c.req.method === 'OPTIONS') {
+    if (method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
         headers: corsHeaders(origin, c.req.header('Access-Control-Request-Headers')),
@@ -40,7 +70,7 @@ export function steeloCors() {
 
     await next();
 
-    // 通常レスポンスにも CORS ヘッダを付与
+    // 通常レスポンスにも CORS ヘッダを付与（上書き）
     const headers = corsHeaders(origin);
     for (const [k, v] of Object.entries(headers)) {
       c.res.headers.set(k, v);

@@ -36,8 +36,8 @@ export * from './dispatch-records';
 export * from './import-batches';
 export * from './payment-summaries';
 export * from './audit-logs';
-// テスト用: better-sqlite3 を D1 API でラップ
-export { createSqliteD1, type SqliteD1 } from './test-helpers/sqlite-d1';
+// テスト用 SQLite アダプタは `./test-helpers/sqlite-d1` から直接 import する。
+// ここから re-export すると Worker バンドルに node:fs / better-sqlite3 が混入する
 
 /**
  * Thin wrapper around D1Database.

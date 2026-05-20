@@ -7,8 +7,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { Hono } from 'hono'
 import {
-  createSqliteD1,
-  type SqliteD1,
   confirmImportBatch,
   ConfirmedBatchAlreadyExistsError,
   createDriver,
@@ -25,6 +23,9 @@ import {
   recoverStuckPaymentJobs,
   insertLineMessageIgnoreDup,
 } from '@line-crm/db'
+// test-helpers は @line-crm/db の testing サブパスから import する
+// （barrel から re-export すると node:fs / better-sqlite3 が Worker バンドルに混入するため）
+import { createSqliteD1, type SqliteD1 } from '@line-crm/db/testing'
 import { calculatePayment } from './services/payment-calculator.js'
 import { buildDriverExcel } from './services/excel-export.js'
 import { handleGroupMessage } from './services/group-message-handler.js'

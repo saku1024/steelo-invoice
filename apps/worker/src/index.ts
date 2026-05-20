@@ -81,7 +81,7 @@ import excelImports from './routes/excel-imports.js';
 import paymentSummaries from './routes/payment-summaries.js';
 import paymentJobs from './routes/payment-jobs.js';
 import auditLogs from './routes/audit-logs.js';
-import { steeloCors } from './middleware/steelo-cors.js';
+import { steeloCors, isSteeloPath } from './middleware/steelo-cors.js';
 import { runPaymentJob } from './services/payment-batch-job.js';
 import {
   deleteExpiredImportPreviews,
@@ -125,28 +125,25 @@ export type Env = {
 
 const app = new Hono<Env>();
 
-// Codex impl review HIGH #5 反映:
-//   STEELO 専用 CORS を **グローバル CORS よりも先に** マウントする。
-//   `app.use('*', cors({ origin: '*' }))` が先に走ると preflight が
-//   全 origin 許可されて STEELO の origin 制限が効かないため。
-app.use('/api/drivers/*', steeloCors());
-app.use('/api/drivers', steeloCors());
-app.use('/api/driver-aliases/*', steeloCors());
-app.use('/api/driver-aliases', steeloCors());
-app.use('/api/driver-deductions/*', steeloCors());
-app.use('/api/driver-deductions', steeloCors());
-app.use('/api/dispatch-records/*', steeloCors());
-app.use('/api/dispatch-records', steeloCors());
-app.use('/api/excel-imports/*', steeloCors());
-app.use('/api/excel-imports', steeloCors());
-app.use('/api/payment-summaries/*', steeloCors());
-app.use('/api/payment-summaries', steeloCors());
-app.use('/api/line-messages/*', steeloCors());
-app.use('/api/line-messages', steeloCors());
-app.use('/api/audit-logs', steeloCors());
-
-// 既存 LINE Harness は全 origin 許可（STEELO 系は上の専用 CORS で先に処理済み）
-app.use('*', cors({ origin: '*' }));
+// Codex impl review HIGH #5 + verify 反映:
+//   Hono v4 は OPTIONS preflight を path-specific `app.use(path, mw)` より
+//   先に自動応答する場合があるため、CORS 分岐は必ず `*` パターン側で行う:
+//     - STEELO 系パス → steeloCors（origin 限定）
+//     - それ以外 → 既存の全 origin 許可
+//   steelo-cors は path 判定を不要とし、グローバル middleware が振り分ける。
+// 既知の dev-only 制約:
+//   Vite dev server は OPTIONS preflight を Worker に到達する前に
+//   自前 CORS で処理してしまうため、`pnpm dev` 環境では steelo-cors が
+//   OPTIONS で実行されないことがある。本番 Workers 環境では問題なく動作する。
+//   ユニットテスト（steelo-cors.test.ts）で OPTIONS の挙動は検証済み。
+const steeloCorsMw = steeloCors();
+const legacyCors = cors({ origin: '*' });
+app.use('*', async (c, next) => {
+  if (isSteeloPath(new URL(c.req.url).pathname)) {
+    return steeloCorsMw(c, next);
+  }
+  return legacyCors(c, next);
+});
 
 // Rate limiting — runs before auth to block abuse early
 app.use('*', rateLimitMiddleware);

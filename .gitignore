@@ -15,3 +15,6 @@ apps/web/out/
 apps/worker/dist/
 .worktrees/
 .claude/worktrees/
+
+# wrangler types で生成される（コミット対象外）
+apps/worker/worker-configuration.d.ts
