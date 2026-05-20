@@ -5,44 +5,54 @@
 タスクは Foundation → Core → Integration → Validation の順で配置し、
 core 層では非依存タスクに `(P)` マーカーを付与する。
 
+## 進捗（バックエンド完了）
+
+- **完了**: 32 / 43 サブタスク。バックエンド（Worker / DB / Excel / ジョブ / 監査）と
+  ベンチマーク・運用ドキュメントは全て完了
+- **残**: Web UI 8 件、ナビ/api.ts 拡張 2 件、統合テスト 1 件（Web 実装と並走可能）
+- **テスト**: STEELO 関連 68 件グリーン（worker 41 + db 27）、typecheck 全パッケージパス
+- **ベンチ**: 200 行 1 ヶ月分の xlsx 生成 11.2ms / +4.30MB（目標 2s / 16MB を大きくクリア）
+
+残タスクは Web UI 中心のため、別 PR / 別ブランチでの分割実装を想定。
+
 ---
 
 ## 1. Foundation: 環境・バインディング・共通基盤の整備
 
-- [ ] 1.1 D1 マイグレーション `046_steelo_phase1.sql` を作成し schema.sql に同期する
+- [x] 1.1 D1 マイグレーション `046_steelo_phase1.sql` を作成し schema.sql に同期する
   - 11テーブル（drivers, driver_aliases, line_messages, dispatch_records, import_previews, import_batches, client_records, driver_deductions, driver_payment_summaries, payment_summary_lines, payment_jobs, audit_logs）の `CREATE TABLE IF NOT EXISTS` を1ファイルに記述する
   - UNIQUE 制約（line_messages.message_id、driver_aliases.alias_name、(driver_id, period) 系、generated column 経由の period_confirmed_key / active_period_key）を含める
   - 必要な複合インデックスを付与する
   - 観測可能完了条件: `pnpm db:migrate:local` がエラーなく完走し、ローカル D1 に全テーブルが存在する
   - _Requirements: 7.1, 7.4, 7.5, 7.6_
 
-- [ ] 1.2 Cloudflare バインディングを wrangler.toml に追加する
+- [x] 1.2 Cloudflare バインディングを wrangler.toml に追加する
   - R2 バケット `STEELO_FILES`（preview/, generated/{period}/ プレフィックス）をバインド
   - Queues `payment-job-queue`（producer + consumer 両方）をバインド。Queues 利用不可なら `payment_jobs` テーブル + Scheduled cron `*/5 * * * *` で代替する旨を README に注記
   - 環境変数 `STEELO_WEB_ORIGINS` のシークレット登録を `wrangler secret put` で行う運用手順を README に追記
   - 観測可能完了条件: `wrangler dev` 起動時に R2/Queues バインディングが警告なくロードされる
   - _Requirements: 5.7, 5.8, 6.3, 7.3_
 
-- [ ] 1.3 共有型を `@line-crm/shared` に追加する
+- [x] 1.3 共有型を `@line-crm/shared` に追加する
   - Driver, DriverAlias, DriverDeduction, LineMessage, DispatchRecord, ClientRecord, ImportBatch, ImportPreview, DriverPaymentSummary, PaymentSummaryLine, PaymentJob, AuditLog の camelCase 型を全て定義
   - PaymentInput / PaymentResult（payment-calculator 用、deductions と rates を入力に持つ）を定義
   - 観測可能完了条件: Worker / Web 双方から型インポートできて `pnpm typecheck` がパスする
   - _Requirements: 7.5, 5.2, 9.1, 10.1_
 
-- [ ] 1.4 STEELO 専用の origin 限定 CORS ミドルウェアを実装する
+- [x] 1.4 STEELO 専用の origin 限定 CORS ミドルウェアを実装する
   - 環境変数 `STEELO_WEB_ORIGINS`（カンマ区切り）をパースし、許可リスト方式で `Access-Control-Allow-Origin` を返す
   - preflight `OPTIONS` を Bearer 必須から除外しつつ、未許可 origin は 403 で拒否する
   - `app.use('/api/(drivers|driver-aliases|driver-deductions|excel-imports|payment-summaries|audit-logs)*', steeloCors)` でマウントする
   - 観測可能完了条件: 許可 origin からは応答 + ヘッダ付き、未許可 origin からは 403 を返す手動 curl テストが通る
   - _Requirements: 6.3, 6.4_
 
-- [ ] 1.5 監査ログ書き込みヘルパを実装する
+- [x] 1.5 監査ログ書き込みヘルパを実装する
   - `recordAudit(db, ctx, { action, resourceType, resourceId, payload })` を提供し、`actor_id`, `actor_name`, `ip`, `user_agent`, `created_at` を埋めて INSERT する
   - 呼び出し側のトランザクションに参加できるよう、ヘルパは外部の `tx` を受け取る形にする
   - 観測可能完了条件: ユニットテストで Hono の `c` モックを渡したときに期待行が D1 に INSERT される
   - _Requirements: 6.8, 10.1, 10.2_
 
-- [ ] 1.6 Cloudflare Access ポリシー運用ゲートを README に明文化する
+- [x] 1.6 Cloudflare Access ポリシー運用ゲートを README に明文化する
   - STEELO 系エンドポイントと管理画面ホストの Access Application 設定手順、Email OTP / Google を許可する例を記載
   - Access policy 未設定でのデプロイを防ぐ手動チェックリストを `docs/operations/cloudflare-access.md` に追加
   - 観測可能完了条件: 運用手順ドキュメントがリポジトリに存在し、本Specの design.md からリンクされている
@@ -52,13 +62,13 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 2. ドライバーマスタ（drivers）
 
-- [ ] 2.1 `@line-crm/db` にドライバー CRUD クエリを追加する
+- [x] 2.1 `@line-crm/db` にドライバー CRUD クエリを追加する
   - UUID 採番、`line_group_id` UNIQUE 重複検出、論理削除（is_active=0）、JST timestamp を扱う
   - 観測可能完了条件: vitest で D1 ローカル相手に CRUD 動作と重複拒否が再現する
   - _Boundary: packages/db (drivers)_
   - _Requirements: 2.1, 2.4, 2.5_
 
-- [ ] 2.2 ドライバー CRUD ルートを実装する
+- [x] 2.2 ドライバー CRUD ルートを実装する
   - GET / POST / PATCH / DELETE のそれぞれで Zod 風の入力検証、camelCase ↔ snake_case 変換、`recordAudit` を行う
   - DELETE は物理削除せず `is_active=0` + audit `action='driver_archive'`
   - 観測可能完了条件: Hono のテストアダプタで4エンドポイントが期待ステータスを返す
@@ -74,14 +84,14 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 3. ドライバー別名マスタ（driver_aliases）
 
-- [ ] 3.1 (P) `driver_aliases` のクエリ関数とルートを実装する
+- [x] 3.1 (P) `driver_aliases` のクエリ関数とルートを実装する
   - 一覧（driver_id 絞り込み）、追加（alias_name UNIQUE 違反は 409）、削除
   - 追加・削除時に `recordAudit(action='driver_alias_create'|'driver_alias_delete')`
   - 観測可能完了条件: alias 追加→重複追加で 409→削除→GET から消える、までが動く
   - _Boundary: routes/driver-aliases.ts, packages/db (driver-aliases)_
   - _Requirements: 8.1, 8.4_
 
-- [ ] 3.2 (P) ドライバー名解決ヘルパを実装する
+- [x] 3.2 (P) ドライバー名解決ヘルパを実装する
   - `resolveDriverIdByName(db, name)` を提供し、(1) `drivers.name` 完全一致 → (2) `driver_aliases.alias_name` 完全一致 の順で解決
   - どちらにも該当しなければ null を返す
   - 観測可能完了条件: vitest で「マスタ一致」「別名一致」「未紐付け」の3ケースが正しく分岐する
@@ -99,13 +109,13 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 4. ドライバー月次控除マスタ（driver_deductions）
 
-- [ ] 4.1 (P) `driver_deductions` のクエリ関数を実装する
+- [x] 4.1 (P) `driver_deductions` のクエリ関数を実装する
   - `(driver_id, period)` UNIQUE での UPSERT、period 絞り込み一覧取得、driver+period での single fetch
   - 観測可能完了条件: vitest で UPSERT の挙動（新規 / 更新）と一覧取得が期待値を返す
   - _Boundary: packages/db (driver-deductions)_
   - _Requirements: 9.1_
 
-- [ ] 4.2 (P) `driver_deductions` ルートを実装する
+- [x] 4.2 (P) `driver_deductions` ルートを実装する
   - GET（period / driver_id クエリ）、PUT（UPSERT）、変更時の `recordAudit(action='deduction_update')`
   - 値はすべて非負整数バリデーション
   - 観測可能完了条件: PUT で UPSERT 動作、変更ログが `audit_logs` に残ることが確認できる
@@ -123,12 +133,12 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 5. LINEグループメッセージ受信（F1）
 
-- [ ] 5.1 `line_messages` のクエリ関数を実装する
+- [x] 5.1 `line_messages` のクエリ関数を実装する
   - INSERT OR IGNORE（message_id UNIQUE による重複拒否を黙過）、一覧（driver/期間/type/limit/offset）、ID 取得
   - 観測可能完了条件: 同 message_id 二度 INSERT で行数が増えないテストが通る
   - _Requirements: 1.7, 4.1, 4.2_
 
-- [ ] 5.2 グループメッセージハンドラサービスを実装する
+- [x] 5.2 グループメッセージハンドラサービスを実装する
   - LINE Webhook event を受け取り、source.type === 'group' のときに driver 解決＋INSERT OR IGNORE
   - バイナリ系（image/file/video/audio）はメタデータのみ保存
   - 既存の friend/scenario ハンドラを呼ばない
@@ -136,7 +146,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - 観測可能完了条件: 4タイプのモック event を投入してそれぞれ正しく保存される
   - _Requirements: 1.1, 1.2, 1.3, 1.5, 1.8_
 
-- [ ] 5.3 webhook.ts にグループ分岐を組み込む
+- [x] 5.3 webhook.ts にグループ分岐を組み込む
   - 既存 `verifySignature` 後の event ループに `source.type === 'group'` 分岐を追加
   - 200 は同期で即返し、保存処理は `executionCtx.waitUntil` で非同期に実行する
   - 観測可能完了条件: 署名付き group event POST に対し 3 秒以内に 200 が返り、その後 D1 に行が現れる
@@ -152,7 +162,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 6. 配車レコード（dispatch_records、F5の一部）
 
-- [ ] 6.1 (P) `dispatch_records` のクエリ関数とルートを実装する
+- [x] 6.1 (P) `dispatch_records` のクエリ関数とルートを実装する
   - 一覧（driver/期間）、新規作成、編集（status='confirmed'）
   - 観測可能完了条件: 新規→編集→一覧表示までが動作する
   - _Boundary: routes/dispatch-records.ts, packages/db (dispatch-records)_
@@ -168,7 +178,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 7. Excel インポート（F3）
 
-- [ ] 7.1 Excel 検証・パースサービスを実装する
+- [x] 7.1 Excel 検証・パースサービスを実装する
   - `validateXlsx(buffer)` で MIME / サイズ / シート数 / 行数 / 列数 / セル総数 / sharedStrings サイズ / 数式 / 外部リンク / OLE / パスワード保護を多層チェックし、超過時は構造化エラーを返す
   - `parseExcel(buffer)` でヘッダーを**名前ベース動的探索**し、対象月・運賃合計・立替合計・会社合計の車両代/電算/前払・手数料率・税率を抽出する
   - 明細部の同便従属行は `fare=NULL`、空メイン行の備考は直前行に連結
@@ -176,13 +186,13 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Boundary: services/excel-import.ts_
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5_
 
-- [ ] 7.2 `import_previews` の永続層を実装する
+- [x] 7.2 `import_previews` の永続層を実装する
   - preview の R2 への JSON 保存（TTL 1h）、`import_previews` 索引行の INSERT、`expires_at` での scheduled cleanup
   - 観測可能完了条件: preview 作成→1時間経過 or scheduled 実行で R2 オブジェクトと DB 行の双方が消える
   - _Boundary: packages/db (import-previews), services/excel-import.ts_
   - _Requirements: 3.6, 7.1_
 
-- [ ] 7.3 Excel インポート preview/confirm ルートを実装する
+- [x] 7.3 Excel インポート preview/confirm ルートを実装する
   - `POST /api/excel-imports/preview`: multipart 受信 → validateXlsx → parseExcel → R2 PUT → `import_previews` INSERT → サマリー＋未紐付け DR 名を返す
   - `POST /api/excel-imports/confirm`: BEGIN → 既存 confirmed があれば `archived` 化（generated column UNIQUE で並行排他）→ `import_batches`(status='confirmed') + `client_records` を bulk INSERT（50行刻み）→ `recordAudit(action='import_confirm'|'import_overwrite')` → COMMIT → R2 preview 削除
   - DR 名解決は 3.2 のヘルパを利用
@@ -201,7 +211,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 8. 支払計算ロジック（純粋関数）
 
-- [ ] 8.1 (P) payment-calculator を純粋関数として実装する
+- [x] 8.1 (P) payment-calculator を純粋関数として実装する
   - 入力は `{ driver.hasInvoice, rates.commissionRate, rates.taxRate, deductions, records[] }`、batch ヘッダーの控除は受け取らない
   - 行単位で「手数料控除→税適用→`Math.round()`」してから合算（`rounding_rule='per_line_round'`）
   - `fare=null` の行は `excludedFromCalc=true` で結果に残し、totals には含めない
@@ -214,7 +224,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 9. Excel エクスポート（個別 xlsx）
 
-- [ ] 9.1 (P) ドライバー別 Excel ビルダーを実装する
+- [x] 9.1 (P) ドライバー別 Excel ビルダーを実装する
   - BOND's フォーマットを土台に、宛名/手数料行/「運賃合計（税込）」化を行う
   - 明細部に当該ドライバーの全行（同便従属行含む）を作業日昇順で描画、運賃列は税込
   - マイナス値は赤字スタイルで表示
@@ -226,20 +236,20 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 10. 支払明細 個別生成 API（同期）
 
-- [ ] 10.1 driver_payment_summaries / payment_summary_lines のクエリ関数を実装する
+- [x] 10.1 driver_payment_summaries / payment_summary_lines のクエリ関数を実装する
   - `UNIQUE (driver_id, period)` UPSERT、明細スナップショットの INSERT、summary 検索（period / driver_id）
   - 観測可能完了条件: UPSERT で旧スナップショットが正しく置き換わり、明細行も再生成されるテストが通る
   - _Boundary: packages/db (payment-summaries, payment-summary-lines)_
   - _Requirements: 5.10, 5.11_
 
-- [ ] 10.2 個別 xlsx 生成 API を実装する
+- [x] 10.2 個別 xlsx 生成 API を実装する
   - `POST /api/payment-summaries/generate { driver_id, period }`: confirmed batch 検索 → `driver_deductions` 取得（不在は 0）→ client_records 取得 → payment-calculator → UPSERT summary（全スナップショット列を埋める）→ summary lines INSERT → `recordAudit('payment_generate')` → buildDriverExcel → `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` を返却
   - 並行して r2_xlsx_key にも保存する（再 DL 用）
   - 観測可能完了条件: 1ドライバー1ヶ月分の生成が同期 API で 2秒以内に完了し、Blob DL できる
   - _Depends: 8.1, 9.1, 10.1, 4.1_
   - _Requirements: 5.1, 5.2, 5.3, 5.7, 5.10, 5.11, 10.2_
 
-- [ ] 10.3 個別 xlsx 再ダウンロード API を実装する
+- [x] 10.3 個別 xlsx 再ダウンロード API を実装する
   - `POST /api/payment-summaries/:summaryId/download-url`: `r2_xlsx_key` が存在すれば 15分の R2 署名付きURL を返す。R2 で消失していれば 410 + 再生成リンク
   - 観測可能完了条件: 既存 summary に対して signed URL を取得し、ブラウザから直接 DL できる
   - _Depends: 10.2_
@@ -249,20 +259,20 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 11. 支払明細 一括生成（非同期ジョブ）
 
-- [ ] 11.1 `payment_jobs` のクエリ関数を実装する
+- [x] 11.1 `payment_jobs` のクエリ関数を実装する
   - INSERT（active_period_key UNIQUE で同 period 重複拒否）、status/progress/done_drivers 更新、`r2_zip_key` セット、失敗時の error_message セット
   - 観測可能完了条件: 同 period 二重投入で 409 相当の競合が発生する
   - _Boundary: packages/db (payment-jobs)_
   - _Requirements: 5.9_
 
-- [ ] 11.2 ジョブ受付ルートを実装する
+- [x] 11.2 ジョブ受付ルートを実装する
   - `POST /api/payment-summaries/jobs { period }`: confirmed batch 検証 → `payment_jobs` 行作成 → Queues に enqueue（or scheduled で取得される pending 行）→ 202 を返す
   - `GET /api/payment-summaries/jobs/:id`: 状態取得
   - 観測可能完了条件: ジョブを投入すると DB に queued 行が現れ、status エンドポイントで参照できる
   - _Depends: 11.1_
   - _Requirements: 5.8, 5.9_
 
-- [ ] 11.3 ジョブ実行コンシューマを実装する
+- [x] 11.3 ジョブ実行コンシューマを実装する
   - Queues consumer（or `scheduled()` で `payment_jobs.status='queued'` を拾う実装）として、各 active driver に対し payment-calculator → buildDriverExcel → R2 PUT を順次実行
   - 全件完了後に jszip で `all.zip` を作成し R2 に PUT、`r2_zip_key` を summary 側にも紐付け、status='completed'
   - 例外時は status='failed' + error_message
@@ -270,7 +280,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Depends: 11.2, 8.1, 9.1, 10.1_
   - _Requirements: 5.7, 5.8, 5.10, 5.11_
 
-- [ ] 11.4 ZIP 署名付きURL API を実装する
+- [x] 11.4 ZIP 署名付きURL API を実装する
   - `POST /api/payment-summaries/jobs/:id/download-url`: 完了ジョブのみ 15分有効な signed URL を返す
   - 観測可能完了条件: completed ジョブから URL 取得 → ブラウザで R2 から直接 ZIP DL ができる
   - _Depends: 11.3_
@@ -287,7 +297,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 12. 監査ログ閲覧
 
-- [ ] 12.1 (P) 監査ログのクエリ関数とルートを実装する
+- [x] 12.1 (P) 監査ログのクエリ関数とルートを実装する
   - actor / action / resource / 期間でのフィルタ、limit/offset ページング、admin ロール限定
   - 観測可能完了条件: GET /api/audit-logs が actor / action でフィルタした行を返す
   - _Boundary: routes/audit-logs.ts, packages/db (audit-logs)_
@@ -303,7 +313,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
 
 ## 13. 統合: ルートマウントとナビゲーション
 
-- [ ] 13.1 Worker `index.ts` に新規ルートをマウントし、Queues consumer を登録する
+- [x] 13.1 Worker `index.ts` に新規ルートをマウントし、Queues consumer を登録する
   - drivers, driver-aliases, driver-deductions, line-messages, dispatch-records, excel-imports, payment-summaries, payment-jobs, audit-logs を `/api/...` にマウント
   - STEELO CORS ミドルウェアを対象パスに適用
   - Queues バインディングがあれば `queue()` ハンドラを登録、無ければ `scheduled()` で payment-jobs を消化
@@ -334,7 +344,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - 観測可能完了条件: `pnpm -F worker test` が緑になる
   - _Requirements: 1.7, 3.7, 3.8, 5.10, 5.13, 7.7_
 
-- [ ] 14.2 Excel エクスポートのベンチマークゲートを設置する
+- [x] 14.2 Excel エクスポートのベンチマークゲートを設置する
   - `services/excel-export.bench.ts` をvitest bench で実装し、1ドライバー1ヶ月分（200 行想定）の生成時間とメモリを計測
   - 目標: 2 秒以内 / 16 MB 以内。閾値超過時は bench が失敗するアサーションを入れる
   - CI（`.github/workflows/`）でも実行されるよう pnpm script を追加
@@ -342,7 +352,7 @@ core 層では非依存タスクに `(P)` マーカーを付与する。
   - _Depends: 9.1_
   - _Requirements: 7.3_
 
-- [ ] 14.3 手動受入チェックリストを `docs/operations/phase1-acceptance.md` に整備する
+- [x] 14.3 手動受入チェックリストを `docs/operations/phase1-acceptance.md` に整備する
   - 実 LINE グループ送信 → line_messages 蓄積確認
   - 実 BOND's 過去 Excel を 1〜2ヶ月分 import → 件数・サマリー整合確認
   - 個別・一括 Excel 生成 → 過去支払明細との差分を手計算で検算
