@@ -1,0 +1,73 @@
+name: STEELO Bench Gate
+
+# STEELO Phase 1 — F6 Excel エクスポート性能ゲート (Task 14.2)
+#
+# 個別ドライバー xlsx 生成が 200 行 / 1 ヶ月分で 2 秒以内 / メモリ +16 MB 以内に
+# 収まることを保証する。pull_request と main push 時に走らせ、target を超過
+# したら CI でフェイルさせる。
+
+on:
+  pull_request:
+    paths:
+      - 'apps/worker/src/services/excel-export.ts'
+      - 'apps/worker/src/services/excel-export.bench.ts'
+      - 'apps/worker/src/services/payment-calculator.ts'
+      - 'apps/worker/package.json'
+      - 'packages/shared/src/steelo.ts'
+      - '.github/workflows/steelo-bench.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/worker/src/services/excel-export.ts'
+      - 'apps/worker/src/services/excel-export.bench.ts'
+      - 'apps/worker/src/services/payment-calculator.ts'
+      - 'apps/worker/package.json'
+      - 'packages/shared/src/steelo.ts'
+      - '.github/workflows/steelo-bench.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build shared deps
+        run: pnpm --filter @line-crm/shared --filter @line-crm/db build || true
+
+      - name: STEELO bench gate (excel-export)
+        run: pnpm --filter worker test:bench
+
+      - name: STEELO Phase 1 ユニットテスト
+        run: |
+          cd apps/worker
+          pnpm exec vitest run \
+            src/services/audit.test.ts \
+            src/services/validation.test.ts \
+            src/middleware/steelo-cors.test.ts \
+            src/services/group-message-handler.test.ts \
+            src/services/payment-calculator.test.ts \
+            src/services/excel-import.test.ts \
+            src/services/excel-export.test.ts \
+            src/steelo-integration.test.ts
+
+      - name: STEELO db ユニットテスト
+        run: |
+          cd packages/db
+          pnpm exec vitest run \
+            src/drivers.test.ts \
+            src/driver-deductions.test.ts \
+            src/line-messages.test.ts \
+            src/import-batches.test.ts

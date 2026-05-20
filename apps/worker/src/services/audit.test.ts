@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from 'vitest';
 import type { Context } from 'hono';
-import { recordAudit, recordSystemAudit } from './audit.js';
+import { recordAudit, recordSystemAudit, safeAudit } from './audit.js';
 import type { Env } from '../index.js';
 
 type Captured = {
@@ -123,5 +123,43 @@ describe('recordSystemAudit', () => {
     expect(b[2]).toBe('system');
     expect(b[3]).toBe('webhook_save_failed');
     expect(JSON.parse(b[6] as string)).toEqual({ error: 'D1 unavailable' });
+  });
+});
+
+describe('safeAudit', () => {
+  test('内部の recordAudit 成功時は通常通り完了する', async () => {
+    const { db, captured } = mockDb();
+    const ctx = mockCtx({ 'CF-Connecting-IP': '203.0.113.5' });
+    await safeAudit(db, ctx, {
+      action: 'driver_create',
+      resourceType: 'driver',
+      resourceId: 'd-1',
+    });
+    expect(captured.sql).toContain('INSERT INTO audit_logs');
+  });
+
+  test('内部の recordAudit が throw しても自身は throw しない（本処理の 500 を防ぐ）', async () => {
+    const failingDb = {
+      prepare: () => {
+        throw new Error('D1 unavailable');
+      },
+    } as unknown as D1Database;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const ctx = mockCtx();
+    await expect(
+      safeAudit(failingDb, ctx, {
+        action: 'driver_create',
+        resourceType: 'driver',
+        resourceId: 'd-1',
+      })
+    ).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[audit-soft-fail]',
+      'driver_create',
+      'driver',
+      'd-1',
+      expect.any(Error)
+    );
+    errorSpy.mockRestore();
   });
 });
