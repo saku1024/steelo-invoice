@@ -265,7 +265,14 @@ export type AuditAction =
   | 'reconciliation_run'
   | 'reconciliation_review'
   | 'dispatch_manual_match'
-  | 'dispatch_status_confirm';
+  | 'dispatch_status_confirm'
+  // Phase 3 intelligence
+  | 'anomaly_baseline_recompute'
+  | 'slack_notification_sent'
+  | 'slack_notification_failed'
+  | 'slack_notification_skipped'
+  | 'report_generated'
+  | 'notification_settings_updated';
 
 export interface AuditLog {
   id: string;

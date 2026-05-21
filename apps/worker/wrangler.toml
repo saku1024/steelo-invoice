@@ -86,8 +86,29 @@ dead_letter_queue = "reconciliation-dlq"
 binding = "RECONCILIATION_DLQ"
 queue = "reconciliation-dlq"
 
+# STEELO Phase 3: PDF レポート生成ジョブ
+[[queues.producers]]
+binding = "REPORT_QUEUE"
+queue = "report-queue"
+
+[[queues.consumers]]
+queue = "report-queue"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 2
+retry_delay = 60
+dead_letter_queue = "report-dlq"
+
+[[queues.producers]]
+binding = "REPORT_DLQ"
+queue = "report-dlq"
+
 [triggers]
-crons = ["*/5 * * * *", "0 */6 * * *"]
+# Phase 1+2 既存: */5 (payment/reconciliation/LLM fallback + recovery)
+# Phase 1 既存: 0 */6 (import_batch_previews TTL クリーンアップ)
+# Phase 3 新規: */1 (slack-dispatcher)
+# Phase 3 新規: 0 0 1 * * = JST 9:00 月初 (baseline recompute + monthly_reminder)
+crons = ["*/5 * * * *", "0 */6 * * *", "*/1 * * * *", "0 0 1 * *"]
 
 # ═══════════════════════════════════════════════════════════════
 # 本番環境
@@ -159,5 +180,22 @@ dead_letter_queue = "reconciliation-dlq"
 binding = "RECONCILIATION_DLQ"
 queue = "reconciliation-dlq"
 
+# STEELO Phase 3: PDF レポート生成ジョブ
+[[env.production.queues.producers]]
+binding = "REPORT_QUEUE"
+queue = "report-queue"
+
+[[env.production.queues.consumers]]
+queue = "report-queue"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 2
+retry_delay = 60
+dead_letter_queue = "report-dlq"
+
+[[env.production.queues.producers]]
+binding = "REPORT_DLQ"
+queue = "report-dlq"
+
 [env.production.triggers]
-crons = ["*/5 * * * *", "0 */6 * * *"]
+crons = ["*/5 * * * *", "0 */6 * * *", "*/1 * * * *", "0 0 1 * *"]

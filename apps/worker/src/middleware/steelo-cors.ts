@@ -31,6 +31,10 @@ export const STEELO_PATH_PREFIXES = [
   // Phase 2
   '/api/reconciliations',
   '/api/llm-parse',
+  // Phase 3
+  '/api/reports',
+  '/api/notification-settings',
+  '/api/anomaly-baselines',
 ] as const;
 
 export function isSteeloPath(pathname: string): boolean {
