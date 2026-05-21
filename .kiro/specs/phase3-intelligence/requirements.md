@@ -49,6 +49,18 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
 1. The system shall 月初の照合実行前に、過去 3 ヶ月の `client_records` (confirmed
    batch のみ) から **driver_id × task_name 単位の運賃中央値・標準偏差** を
    `anomaly_baselines` テーブルに事前計算して保存する。
+   - **Codex round 2 HIGH #4 反映**: 「過去 3 ヶ月」の定義を以下に固定:
+     - `period=YYYY-MM` を照合対象月 (= recompute API のクエリパラメータ) とする
+     - baseline 計算 source は `period` の **直前 3 完了月**:
+       `period_from = period - 3 months`, `period_to = period - 1 month`
+     - 例: `period=2026-05` → source は `2026-02 / 03 / 04` の 3 ヶ月分
+   - **recompute は対象世代の全置換**:
+     1. 対象 `period_from / period_to` 範囲の旧 baseline 行を DELETE
+     2. 新 baseline 行を INSERT
+     3. 両操作を D1 batch (1 トランザクション) 内で実行
+     - 「以前は driver/task 組合せがあったが今は無い」レコードも上記 DELETE で
+       消えるため、stale baseline の残留を防ぐ
+   - 月初 cron (`0 0 1 * *`) は当月の `period` を渡して自動 recompute する
 2. **Codex Phase 3 review HIGH #9 反映**: ベースライン採用の優先順位は次の通り:
    1. `count(driver_id × task_name) >= 5` → そのまま task baseline を使用
    2. それ未満で `count(driver_id, 全 task) >= 3` → driver-fallback baseline
@@ -93,27 +105,33 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
 
 #### Acceptance Criteria
 
-1. **Codex Phase 3 review HIGH #11 反映**: When dispatch_record / client_record で
-   `start_time > end_time` が成立する場合、the system shall 以下のアルゴリズムで
-   `time_inversion` warning を判定する:
+1. **Codex Phase 3 round 1 HIGH #11 / round 2 HIGH #3 反映**: When dispatch_record
+   / client_record で `start_time > end_time` が成立する場合、the system shall
+   以下のアルゴリズムで `time_inversion` warning を判定する:
    1. `HH:MM[:SS]` を 0〜1439 分に parse、parse 失敗は skip
    2. `start_min <= end_min` → 正常 (warning なし)
-   3. `start_min > end_min` かつ `(1440 - start_min) + end_min < 720` →
-      **overnight** 扱い (warning なし)
-   4. それ以外 (`start_min > end_min` かつ overnight 距離 >= 720) →
-      `time_inversion` warning
-   - 境界の `720` は overnight 側に含める（=overnight 扱い）
+   3. `start_min > end_min` の場合は overnight 距離を算出:
+      `overnight_distance = (1440 - start_min) + end_min`
+   4. **`overnight_distance <= 720` → overnight 扱い (warning なし)**
+   5. **`overnight_distance > 720` → `time_inversion` warning**
+   - 境界 `720` は overnight 側に含める (例: `12:00 → 00:00` は overnight)
 2. **Codex Phase 3 review MEDIUM #16 反映**: Phase 2 の
    `advance_payment_without_dispatch` (立替金あり + 未マッチ) は **維持** し、
    Phase 3 で **追加** で以下を実装する:
    - `advance_payment_without_label`: client_record `advance_payment > 0` だが
      matched dispatch_record の `task_name` に「立替」「実費」「立て替え」
      キーワードを含まない場合、info severity warning
-3. **Codex Phase 3 review HIGH #10 反映**: When 同 driver × 同日に 3 件以上の
-   dispatch_record が存在する場合、the system shall `dispatch_overload` warning を
-   info severity で出力する。**判定は reconciliation-job が事前に**
-   `dispatchCountByDriverDate: Map<string, number>` を集計して anomaly-detector に
-   渡す（detector を純粋関数に保つ）。`dispatch_only` 行にも出力する。
+3. **Codex round 1 HIGH #10 / round 2 MEDIUM #8 反映**: When 同 driver × 同日に
+   3 件以上の dispatch_record が存在する場合、the system shall
+   `dispatch_overload` warning を info severity で出力する。
+   - 判定は reconciliation-job が事前に `dispatchCountByDriverDate:
+     Map<string, number>` を集計して anomaly-detector に渡す
+     (detector を純粋関数に保つ)
+   - **count 対象は `getDispatchesForPeriod(period)` が返す period 内
+     dispatch_records 全件** (matched / dispatch_only どちらの reconciliation 行か
+     問わず、period に属する全 dispatch を count)
+   - warning は `dispatch_only` 行・`matched` 行どちらにも出力する
+     (同 driver × 同日が 3 件以上ある場合は全行に重複してマーク)
 4. The system shall Phase 2 の `reconciliations.warnings` を JSON 配列のまま使い、
    1 行に複数 warning が並ぶケースを許容する。Web UI では severity 別に色分け表示する。
 
@@ -141,12 +159,16 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
    「STEELO 通知設定が更新されました」というテストメッセージを送る。
    GET は URL をマスク表示し、空文字または `null` でリセット可能。
    DELETE は対応しない（id=1 は常に存在、内容を空にすることで無効化）。
-3. **Codex Phase 3 review CRITICAL #4 反映**: The system shall Slack 投稿失敗時に
-   audit_logs に記録し、management 画面でも「直近の投稿失敗」を表示する。
-   リトライは exponential backoff で **`waitUntil` 30 秒制限内に収まる
-   `1s + 3s + 8s = 12s`** で最大 3 回。それでも失敗した場合は次回 cron
-   (`*/5 * * * *`) で `notification_deliveries` に未送信記録があるものを再送する
-   (idempotency key 経由、Requirement 4.6 参照)。
+3. **Codex round 1 CRITICAL #4 / round 2 補強 反映**: The system shall Slack 投稿
+   失敗時に audit_logs に記録し、management 画面でも「直近の投稿失敗」を表示する。
+   - **fetch 自体の timeout は 1 回あたり 5 秒** (`AbortController` で abort)
+   - retry は exponential backoff `sleep 1s → fetch 5s → sleep 3s → fetch 5s
+     → sleep 8s → fetch 5s` = 最悪累積 **27 秒** で **`waitUntil` 30 秒制限内** に収まる
+   - 上記 3 回でも失敗した場合、`notification_deliveries` 行は `status='pending'`
+     のまま `attempt_count` を増やして `next_retry_at = now + 5 分` を設定
+   - 次の cron `*/1` で再 claim → 再試行 (Slack 障害復旧後に自動再送)
+   - `attempt_count >= 6` で `status='failed'` に倒し、`audit_logs` に
+     `slack_notification_failed` を記録
 4. The system shall Webhook URL を `audit_logs.payload` に直接保存しない
    （URL 自体が secret 相当）。ログには `slack_webhook_set` のような action のみ記録する。
    エラーログにも URL を含めず、`last_error` には HTTP status + 末尾の path
@@ -220,12 +242,21 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
    - enqueue 失敗時は即 `failed` に倒す
    - cron `*/5 * * * *` で 30 分以上 `running` の job を `failed` にリカバリ
    - 同じ period × type を続けて生成したい場合は既存 job を完了させてから
-5. **Codex Phase 3 review MEDIUM #19 反映**: `report_jobs` は生成元データの
-   identity をスナップショットとして保持する:
-   - `source_import_batch_id`, `source_reconciliation_job_id`,
-     `source_payment_job_id` (該当する種別のみ非 NULL)
+5. **Codex round 1 MEDIUM #19 / round 2 HIGH #5 反映**: `report_jobs` は生成元
+   データの identity をスナップショットとして保持し、**report_type ごとに必須
+   source を持つ**。POST `/api/reports` 時点で該当 source が無ければ 422 で fail:
+   - `reconciliation` (P0): **`source_reconciliation_job_id` 必須**
+     (該当 period の最新 `status='completed'` reconciliation_jobs.id を解決)
+   - `client_summary` (P1): **`source_import_batch_id` 必須**
+     (該当 period の `status='confirmed'` import_batches の最新 id を解決)
+   - `payment_summary` (P2): **`source_payment_job_id` 必須**
+     かつ payment 系は既存テーブル (`driver_payment_summaries`) が upsert で
+     上書きされる構造のため、Phase 3 では PDF 生成時に支払明細をその場で
+     **payment-calculator から再計算** して使う (P2 は P0/P1 完了後に別途
+     spec 化、Phase 3 では P2 は実装着手前に再評価)
    - レポート生成中の元データ更新が PDF に混ざらないよう、ジョブ開始時に
-     対象 source ID を固定する
+     対象 source ID を固定する。source 紐付け先が生成中に変更されても source
+     ID を介して「ジョブ開始時点の snapshot」を読みに行く
 6. While **P0** の照合結果レポート (1 ヶ月分・200 行規模) は 30 秒以内に完了する。
    500 行を超える大規模データは Phase 3 では `failed` に倒し
    `error_message: "row count exceeds 500"` で明示する (Phase 4 で分割対応)。

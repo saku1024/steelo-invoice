@@ -92,17 +92,18 @@ graph TB
     Fonts[fonts/NotoSansJP-Regular.ttf]
   end
 
-  ReconJob --> AnomalyDet
+  ReconJob -.->|enqueue only| NotifDeliveries
+  NotifDeliveries[(notification_deliveries<br/>新規)]
   AnomalyDet --> Baselines
   AnomalyDet --> Reconciliations
-  ReconJob --> Slackv
 
   ScheduledCron --> BaselineJob
   BaselineJob --> ImportBatches
   BaselineJob --> Baselines
 
-  ScheduledCron --> Slackv
-  ScheduledCron -.->|月初リマインド| Slack
+  ScheduledCron -->|cron */1| Slackv
+  ScheduledCron -.->|cron 月初リマインドのみ enqueue| NotifDeliveries
+  ScheduledCron -.->|LLM 連続失敗を enqueue| NotifDeliveries
 
   ReportJob --> PdfGen
   PdfGen --> Templates
@@ -110,9 +111,17 @@ graph TB
   ReportJob --> PDF
   ReportJob --> ReportJobs
 
+  Slackv --> NotifDeliveries
   Slackv --> Slack
   Slackv --> NotifSettings
 ```
+
+> **Codex Phase 3 round 2 review CRITICAL #1 反映**:
+> Slack を直接呼べるのは **slack-dispatcher (cron `*/1`) と notification-settings
+> ルートのテスト送信エンドポイントのみ**。`reconciliation-job` と他の業務
+> ジョブは `notification_deliveries` に enqueue するだけで、Slack 直接呼出は
+> 設計上禁止する。アーキテクチャ図は `ReconJob -.-> notification_deliveries` の
+> 点線でこの境界を表現する。
 
 ### Technology Stack 追加
 
@@ -123,7 +132,58 @@ graph TB
 | Slack | Incoming Webhook | 通知投稿 | URL は notification_settings に保存 (D1 EAR + マスク表示) |
 | Queue (report) | **`REPORT_QUEUE` (新規、別 queue)** | report job 専用 (Codex CRITICAL #7) | reconciliation-queue 流用すると consumer 分岐が壊れるため別建て。DLQ は `report-dlq` |
 | Notification 再送 | **cron `*/1 * * * *`** | `notification_deliveries.status='pending'` の Slack 再送 | reconciliation-job からは Slack 直接呼び出さない (CRITICAL #5) |
-| Cron | 既存に `0 0 1 * *` (UTC) = JST 9:00 月初 追加 | 月初リマインド | Phase 1+2 の `*/5 * * * *` `0 */6 * * *` と並列。冗長起動は `notification_deliveries.idempotency_key` で防ぐ |
+| Cron | 既存に `0 0 1 * *` (UTC) = JST 9:00 月初 追加 | 月初リマインド + baseline recompute | Phase 1+2 の `*/5 * * * *` `0 */6 * * *` と並列。冗長起動は `notification_deliveries.idempotency_key` で防ぐ |
+
+### cron 別の処理分岐 (Codex round 2 HIGH #6 反映)
+
+scheduled handler は `event.cron` で分岐し、各 cron が実行する処理を限定する:
+
+```ts
+async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  switch (event.cron) {
+    case '*/5 * * * *':  // Phase 1+2 既存
+      // payment_jobs fallback / reconciliation_jobs recovery / LLM parse fallback
+      // + report_jobs stuck recovery (Phase 3 追加)
+      // + LLM 連続失敗 streak 検知 → notification_deliveries enqueue
+      break;
+    case '0 */6 * * *':  // Phase 1 既存
+      // import_batch_previews TTL クリーンアップ
+      break;
+    case '*/1 * * * *':  // Phase 3 新規
+      // slack-dispatcher: notification_deliveries の pending を 10 件 claim → 送信
+      break;
+    case '0 0 1 * *':  // Phase 3 新規 (JST 9:00 月初)
+      // anomaly_baselines 再計算 (当月の period で)
+      // + 前月 import_batch 未取込なら monthly_reminder enqueue
+      break;
+  }
+}
+```
+
+既存 `*/5` cron に Phase 3 処理を **追加** するため、`wrangler.toml` の `[triggers]`
+を更新する (default + production):
+
+```toml
+[triggers]
+crons = [
+  "*/5 * * * *",   # Phase 1+2 既存
+  "0 */6 * * *",   # Phase 1 既存
+  "*/1 * * * *",   # Phase 3 新規: slack-dispatcher
+  "0 0 1 * *",     # Phase 3 新規: 月初 baseline recompute + reminder
+]
+```
+
+`index.ts` の queue consumer 分岐に `report-queue` を追加 (Codex round 2 HIGH #6):
+
+```ts
+switch (batch.queue) {
+  case 'payment-job-queue':   /* Phase 1 */ break;
+  case 'llm-parse-queue':     /* Phase 2 */ break;
+  case 'reconciliation-queue':/* Phase 2 */ break;
+  case 'report-queue':        /* Phase 3 新規 */ break;
+  default: throw new Error(`unknown queue: ${batch.queue}`);
+}
+```
 
 ### F8 異常検知強化フロー
 
@@ -146,7 +206,8 @@ sequenceDiagram
     Det->>DB: SELECT anomaly_baselines WHERE driver_id=? AND task_name=?
     Det-->>Job: warnings[] (構造化)
     Job->>DB: INSERT reconciliations.warnings (JSON 構造化)
-    Job->>Slack: notifyCompleted(period, summary, anomalyCount)
+    Job->>DB: INSERT notification_deliveries (status=pending,<br/>idempotency_key=reconciliation_completed:{jobId})
+    Note over Job: Job 本体はここで完了。Slack 実送信は cron */1 の<br/>slack-dispatcher が拾う (CRITICAL #1 / #5 反映)
 ```
 
 ### F9 Slack 通知フロー
@@ -173,8 +234,10 @@ sequenceDiagram
         Cron1->>DB: INSERT notification_deliveries<br/>(idempotency_key=monthly_reminder:{prev_period},<br/> status=pending)
     end
 
-    Cron2->>DB: SELECT * FROM notification_deliveries WHERE status='pending' LIMIT 10
-    loop 各 pending row
+    Note over Cron2,DB: claim phase (Codex round 2 HIGH #2 反映):<br/>UPDATE notification_deliveries SET status='processing', claimed_at=now, claimed_by=runId<br/>WHERE id IN (SELECT id FROM ... WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= now) LIMIT 10)
+    Cron2->>DB: claim batch (atomic UPDATE)
+    Cron2->>DB: SELECT claimed rows
+    loop 各 claimed row
         Cron2->>Notif: send(row)
         Notif->>DB: SELECT * FROM notification_settings
         alt enabled_events 該当 + URL 設定済み
@@ -424,21 +487,31 @@ CREATE TABLE IF NOT EXISTS notification_settings (
 );
 INSERT OR IGNORE INTO notification_settings (id) VALUES (1);
 
--- 通知の送信記録 + 再送キュー (Codex Phase 3 review HIGH #13 反映)
+-- 通知の送信記録 + 再送キュー
+--   Codex Phase 3 round 1 HIGH #13: enqueue 重複防止 (idempotency_key UNIQUE)
+--   Codex Phase 3 round 2 HIGH #2: 送信重複防止 (claim 機構)
+--   Codex Phase 3 round 2 MEDIUM #7: payload schema バージョニング
 CREATE TABLE IF NOT EXISTS notification_deliveries (
-  id                TEXT PRIMARY KEY,
-  idempotency_key   TEXT NOT NULL UNIQUE,        -- 例: reconciliation_completed:{jobId}
-  event_type        TEXT NOT NULL,               -- reconciliation_completed | monthly_reminder | llm_parse_failed_streak
-  status            TEXT NOT NULL DEFAULT 'pending', -- pending | sent | failed | skipped
-  attempt_count     INTEGER NOT NULL DEFAULT 0,
-  payload_json      TEXT NOT NULL,               -- Slack Block Kit 構造そのまま
-  last_error        TEXT,                        -- URL 本体は含めない (status + path 末尾のみ)
-  requested_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  sent_at           TEXT,
-  next_retry_at     TEXT                         -- pending で次回試行可能になる時刻
+  id                  TEXT PRIMARY KEY,
+  idempotency_key     TEXT NOT NULL UNIQUE,      -- 例: reconciliation_completed:{jobId}
+  event_type          TEXT NOT NULL,             -- reconciliation_completed | monthly_reminder | llm_parse_failed_streak
+  status              TEXT NOT NULL DEFAULT 'pending', -- pending | processing | sent | failed | skipped
+  attempt_count       INTEGER NOT NULL DEFAULT 0,
+  -- claim 機構: dispatcher が pending → processing に claim してから送信
+  claimed_at          TEXT,
+  claimed_by          TEXT,                      -- dispatcher invocation の uuid
+  -- payload バージョニング (Codex round 2 MEDIUM #7)
+  payload_schema_ver  INTEGER NOT NULL DEFAULT 1,
+  event_payload_json  TEXT NOT NULL,             -- イベント生データ (Block Kit ではない)
+  last_error          TEXT,                      -- URL 本体は含めない (status + path 末尾のみ)
+  requested_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  sent_at             TEXT,
+  next_retry_at       TEXT                       -- NULL = 即時試行可能、それ以外は <= now で試行可能
 );
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_pending
   ON notification_deliveries (status, next_retry_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_processing
+  ON notification_deliveries (status, claimed_at) WHERE status = 'processing';
 
 -- レポート生成ジョブ
 CREATE TABLE IF NOT EXISTS report_jobs (

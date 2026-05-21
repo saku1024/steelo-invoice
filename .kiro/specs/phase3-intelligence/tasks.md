@@ -47,10 +47,18 @@ Foundation → F8 → F9 → F10 → Validation の順、`(P)` で並列実行�
   - CORS unit test に Phase 3 prefix が許可 origin 限定であることを確認
   - 観測可能完了条件: 既存 `steelo-cors.test.ts` に Phase 3 用ケース追加 + 緑
 
-- [ ] 1.5 REPORT_QUEUE (新規) と report-dlq を追加 (Codex CRITICAL #7)
-  - `wrangler.toml` に producer + consumer + dead_letter_queue 設定
-  - default + production 両方
-  - 観測可能完了条件: `wrangler dev` で `REPORT_QUEUE` バインディング警告なし
+- [ ] 1.5 REPORT_QUEUE (新規) と report-dlq + cron triggers を追加
+  (Codex round 1 CRITICAL #7 / round 2 HIGH #6 反映)
+  - `wrangler.toml` に追加 (default + production 両方):
+    - `[[queues.producers]] REPORT_QUEUE = "report-queue"`
+    - `[[queues.consumers]]` (max_retries=2 / DLQ `report-dlq`)
+    - `[[queues.producers]] REPORT_DLQ = "report-dlq"`
+    - `[triggers].crons` に `*/1 * * * *` と `0 0 1 * *` を追加 (既存と並列)
+  - `apps/worker/src/index.ts` の queue consumer 分岐に `case 'report-queue'` を
+    追加 (`runReportJob` を呼ぶ)
+  - scheduled handler を `event.cron` で分岐させ、各 cron が実行する処理を限定
+  - 観測可能完了条件: `wrangler dev` で全 queue + cron バインディング警告なし、
+    各 cron の責務分岐をユニットテストで確認
 
 - [ ] 1.6 services/parse-warnings.ts (Codex CRITICAL #2)
   - `parseWarnings(raw)` / `serializeWarnings(warnings)` を実装
@@ -126,25 +134,49 @@ Foundation → F8 → F9 → F10 → Validation の順、`(P)` で並列実行�
   - Slack URL マスク表示用ヘルパ
   - 観測可能完了条件: 4 ユニットテスト
 
-- [ ] 3.2 `db/notification-deliveries.ts` クエリ関数 (Codex HIGH #13)
-  - `enqueue(key, eventType, payloadJson)` (INSERT OR IGNORE で重複防止)
-  - `listPending(limit, now)` (next_retry_at <= now)
+- [ ] 3.2 `db/notification-deliveries.ts` クエリ関数
+  (Codex round 1 HIGH #13 + round 2 HIGH #2 反映)
+  - `enqueue(key, eventType, eventPayloadJson)` (INSERT OR IGNORE で重複防止)
+  - **`claimBatch(runId, limit, now)`**: atomic UPDATE で
+    `status='pending' AND (next_retry_at IS NULL OR next_retry_at <= ?)` を
+    `status='processing', claimed_at=now, claimed_by=runId` に倒す。RETURNING で
+    claim した row 一覧を返す
+  - **`recoverStuckProcessing(staleThresholdMin=10)`**: `claimed_at` が 10 分以上
+    前の `processing` 行を `pending` に戻す (dispatcher 死活でも未送信が拾われる)
   - `markSent(id)` / `markFailed(id, lastError)` / `markSkipped(id, reason)`
-  - `incrementAttempt(id, nextRetryAt)` (5xx retry 用)
-  - 観測可能完了条件: 5 ユニットテスト
+  - `incrementAttemptAndRequeue(id, nextRetryAt)` (5xx retry 用: status を
+    pending に戻し attempt_count++)
+  - `cooldownActive(eventType, eventKey, withinHours)`: 直近 N 時間で
+    同 event の `sent | processing | pending` 行があるかをチェック
+    (LLM streak cooldown 用、Codex round 2 HIGH #2 反映)
+  - 観測可能完了条件: 7 ユニットテスト (atomic claim / stale recovery / cooldown
+    判定 / retry 増加)
 
-- [ ] 3.3 `services/slack-notifier.ts` を実装 (Codex CRITICAL #4)
-  - `sendSlackNotification()`: fetch + exp backoff **1s + 3s + 8s = 12s 以内**
-  - `buildReconciliationCompletedMessage()`: Block Kit JSON 組立
-  - `buildMonthlyReminderMessage()`, `buildLLMFailureStreakMessage()`
+- [ ] 3.3 `services/slack-notifier.ts` を実装
+  (Codex round 1 CRITICAL #4 / round 2 補強 反映)
+  - `sendSlackNotification()`: 各 fetch を `AbortController` で **5 秒 timeout**、
+    retry sleep `1s → 3s → 8s` で **最悪累積 27 秒** (waitUntil 30s 制限内)
+  - **payload は event_payload_json + schema_version を取り出して Block Kit を
+    送信時に組み立てる** (Codex round 2 MEDIUM #7 反映、payload schema 変更耐性)
+  - `buildReconciliationCompletedBlocks()`, `buildMonthlyReminderBlocks()`,
+    `buildLLMFailureStreakBlocks()` は別関数 (schema_version=1 用)
   - URL は last_error に含めない (HTTP status + path 末尾 `/services/***/***/***`)
-  - 観測可能完了条件: モック fetch で 6 ユニットテスト (200/4xx/5xx/timeout/累積時間)
+  - **Slack を呼んでよいのは slack-dispatcher と /api/notification-settings/test
+    のみ** (Codex round 2 CRITICAL #1 境界)
+  - 観測可能完了条件: モック fetch で 7 ユニットテスト
+    (200 / 4xx 即 failed / 5xx 累積 27s 内に収束 / fetch timeout / payload version /
+    Block Kit 組立)
 
-- [ ] 3.4 `services/slack-dispatcher.ts` cron consumer (Codex CRITICAL #5)
-  - 1 分粒度 cron で `notification_deliveries.status='pending'` を 10 件単位処理
-  - 4xx → status=failed、5xx → attempt_count++ + next_retry_at += 5min
-  - 累積 attempt が 6 を超えたら status=failed
-  - 観測可能完了条件: 統合テストで pending → sent / failed 両方
+- [ ] 3.4 `services/slack-dispatcher.ts` cron consumer
+  (Codex round 1 CRITICAL #5 / round 2 HIGH #2 反映)
+  - 1 分粒度 cron `*/1` で実行
+  - `recoverStuckProcessing(10)` → stale claim を pending に戻す
+  - `claimBatch(runId, 10, now)` で atomic UPDATE → claim した row 一覧取得
+  - 各 row について slack-notifier.send → markSent / incrementAttemptAndRequeue /
+    markFailed
+  - 累積 `attempt_count >= 6` で status=failed に倒す
+  - 観測可能完了条件: 統合テストで pending → sent / failed / 4xx 即 fail /
+    stale claim 復旧 を 4 ケース確認
 
 - [ ] 3.5 `routes/notification-settings.ts` を実装
   - GET (mask URL), PUT (URL + enabled_events 更新 → テスト投稿 enqueue)
@@ -208,13 +240,22 @@ P0 (reconciliation) で PDF 基盤の Workers 動作を確認、その後 P1 / P
     expected text / footer 番号確認 (Codex MEDIUM #18)
   - _Requirements: 5.1, 6.1_
 
-- [ ] 4.4 `db/report-jobs.ts` クエリ関数 (Phase 2 reconciliation_jobs パターン踏襲)
-  - createJob (active_report_key UNIQUE 違反で 409)
+- [ ] 4.4 `db/report-jobs.ts` クエリ関数
+  (Codex round 1 CRITICAL #6 / round 2 HIGH #5 反映)
+  - **`createJob({period, reportType, sourceIds, requestedBy})`**: report_type
+    ごとの必須 source ID をチェック。無ければ `ReportSourceMissingError` で
+    422 を返せるエラー型を投げる:
+    - `reconciliation`: `sourceReconciliationJobId` 必須 (該当 period の
+      `status='completed'` 最新 reconciliation_jobs.id を resolver で解決)
+    - `client_summary`: `sourceImportBatchId` 必須 (該当 period の
+      `status='confirmed'` 最新 import_batches.id)
+    - `payment_summary`: Phase 3 では実装着手前に再評価 (P2)
+  - createJob は active_report_key UNIQUE 違反で 409
   - tryMarkRunning, markCompleted (byte_size + page_count + r2_key 込み),
-    markFailed, recoverStuck (Codex CRITICAL #6)
+    markFailed, recoverStuck
   - listByPeriod, get
-  - source_*_id をジョブ開始時に保存 (Codex MEDIUM #19)
-  - 観測可能完了条件: 6 ユニットテスト (排他 / リカバリ / source 保存)
+  - 観測可能完了条件: 8 ユニットテスト (排他 / リカバリ / source 解決成功 /
+    source 不在で 422 / 各 report_type 必須項目)
   - _Requirements: 5.4, 5.5, 8.1_
 
 - [ ] 4.5 `services/report-job.ts` consumer
