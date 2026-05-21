@@ -1,11 +1,14 @@
 # STEELO 本番デプロイ手順書
 
-Phase 1 (支払明細生成の半自動化) + Phase 2 (LLM 解析 + 自動照合) を Cloudflare 本番環境に
-投入する手順。**新規環境への初回デプロイ** と **既存環境への Phase 2 追加** の両方を
-カバーする。各ステップを順番に実行し、チェックボックスを埋めてから次に進むこと。
+Phase 1 (支払明細半自動化) + Phase 2 (LLM 解析 + 自動照合) + Phase 3
+(異常検知強化 + LINE 通知 + 月次 PDF レポート) を Cloudflare 本番環境に投入する手順。
+**新規環境への初回デプロイ** と **既存環境への追加デプロイ** の両方をカバーする。
+各ステップを順番に実行し、チェックボックスを埋めてから次に進むこと。
 
 このドキュメントは「実行手順」のみを書く。各機能の振る舞い確認は
-[`phase1-acceptance.md`](./phase1-acceptance.md) と [`phase2-acceptance.md`](./phase2-acceptance.md)
+[`phase1-acceptance.md`](./phase1-acceptance.md) /
+[`phase2-acceptance.md`](./phase2-acceptance.md) /
+[`phase3-acceptance.md`](./phase3-acceptance.md)
 を参照。
 
 ---
@@ -341,6 +344,98 @@ D1 には自動ロールバック機能がないため、Phase 2 migration 047 �
 
 ---
 
+## 8.5. Phase 3 デプロイ追加手順
+
+Phase 1 + Phase 2 が本番投入済みの状態で、Phase 3 を追加で投入する場合の手順。
+
+### 8.5.1 D1 マイグレーション
+
+- [ ] Phase 3 schema を本番 D1 に適用
+  ```sh
+  wrangler d1 execute line-crm --env production --remote \
+    --file=packages/db/migrations/048_phase3_intelligence.sql
+  ```
+
+### 8.5.2 Queues 作成 (REPORT_QUEUE + DLQ)
+
+- [ ] Phase 3 PDF レポート用キューを作成
+  ```sh
+  wrangler queues create report-queue
+  wrangler queues create report-dlq
+  ```
+
+### 8.5.3 R2 にフォントをアップロード
+
+PDF に日本語を埋め込むため Noto Sans JP TTF が必要。
+
+- [ ] Noto Sans JP Regular を入手
+  ```sh
+  # GitHub の noto-fonts リポジトリから (要 git clone or 個別 DL)
+  # または https://fonts.google.com/noto/specimen/Noto+Sans+JP からダウンロード
+  ```
+
+- [ ] R2 にアップロード
+  ```sh
+  wrangler r2 object put steelo-files/fonts/NotoSansJP-Regular.ttf \
+    --file=NotoSansJP-Regular.ttf --env production
+  ```
+
+- [ ] (任意) Bold もアップロードすると見出しが太字に
+  ```sh
+  wrangler r2 object put steelo-files/fonts/NotoSansJP-Bold.ttf \
+    --file=NotoSansJP-Bold.ttf --env production
+  ```
+
+### 8.5.4 Cron triggers 更新
+
+`wrangler.toml` の `[env.production.triggers].crons` が 4 つに増えていることを確認:
+
+```toml
+[env.production.triggers]
+crons = ["*/5 * * * *", "0 */6 * * *", "*/1 * * * *", "0 0 1 * *"]
+```
+
+| Cron | 役割 |
+|---|---|
+| `*/5 * * * *` | Phase 1+2 既存 + Phase 3 report job recovery / fallback / LLM streak 検知 |
+| `0 */6 * * *` | Phase 1 既存 (import_batch_previews TTL クリーンアップ) |
+| `*/1 * * * *` | **Phase 3 新規**: notification-dispatcher |
+| `0 0 1 * *` | **Phase 3 新規**: 月初 baseline recompute + monthly_reminder |
+
+- [ ] `wrangler deploy --env production` 後に Dashboard で 4 cron trigger が
+      表示されていることを確認
+
+### 8.5.5 Cloudflare Access に Phase 3 API パス追加
+
+既存 Application に以下 3 パスを追加 (既存 Phase 1+2 パスはそのまま):
+
+- [ ] `/api/anomaly-baselines/*`
+- [ ] `/api/notification-settings/*`
+- [ ] `/api/reports/*`
+
+### 8.5.6 LINE 通知設定
+
+- [ ] 管理画面または curl で初期設定:
+  ```sh
+  # 1. LINE Bot の User ID / Group ID を取得 (Phase 1 の bot が webhook で受信した
+  #    line_messages.sender_user_id 等から確認可能)
+  # 2. PUT で登録
+  curl -X PUT https://worker.example.com/api/notification-settings \
+    -H "Authorization: Bearer $API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "lineTargetId": "U1234567890abcdef1234567890abcdef",
+      "enabledEvents": ["reconciliation_completed", "monthly_reminder", "llm_parse_failed_streak"]
+    }'
+  ```
+
+- [ ] 1 分以内に LINE 宛にテスト通知が届くことを確認 (PUT 時に自動で
+      reconciliation_completed の dummy payload が enqueue される)
+
+### 8.5.7 動作確認
+
+- [ ] [`phase3-acceptance.md`](./phase3-acceptance.md) の項目を一通り実施
+
 ## 9. デプロイ完了の判定基準
 
 以下がすべて満たされたら「Phase 1 + Phase 2 本番投入完了」と判定する:
@@ -353,5 +448,5 @@ D1 には自動ロールバック機能がないため、Phase 2 migration 047 �
 
 ---
 
-_最終更新: Phase 2 リリース時点。Phase 3 (異常検知 / Slack 通知 / レポート PDF) を
-追加する時はこのドキュメントを更新すること。_
+_最終更新: Phase 3 リリース時点。Phase 4 (機械学習スコア改善 / マルチテナント /
+P2 payment_summary 再評価) を追加する時はこのドキュメントを更新すること。_

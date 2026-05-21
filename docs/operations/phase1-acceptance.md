@@ -7,7 +7,8 @@ Phase 1 MVP の本番投入前に、以下の手動シナリオで業務要件�
 > 本ドキュメントは「動作確認シナリオ」を扱う。デプロイ後の §6 スモークテストから
 > 続く位置付け。
 >
-> **Phase 2** の受入は [`phase2-acceptance.md`](./phase2-acceptance.md) へ。
+> **Phase 2** の受入は [`phase2-acceptance.md`](./phase2-acceptance.md) へ、
+> **Phase 3** は [`phase3-acceptance.md`](./phase3-acceptance.md) へ。
 
 ## 0. 事前準備
 

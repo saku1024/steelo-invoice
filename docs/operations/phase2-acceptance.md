@@ -6,6 +6,7 @@ Phase 1 のチェック ([`phase1-acceptance.md`](./phase1-acceptance.md)) を�
 
 > **デプロイ手順そのもの** は [`deployment.md`](./deployment.md) を参照。
 > 本ドキュメントは「動作確認シナリオ」を扱う。
+> **Phase 3** の受入は [`phase3-acceptance.md`](./phase3-acceptance.md) へ。
 
 ## 0. 事前準備
 

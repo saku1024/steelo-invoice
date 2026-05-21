@@ -50,7 +50,7 @@ jobs:
       - name: STEELO bench gate (excel-export)
         run: pnpm --filter worker test:bench
 
-      - name: STEELO Phase 1 + 2 ユニットテスト
+      - name: STEELO Phase 1 + 2 + 3 ユニットテスト
         run: |
           cd apps/worker
           pnpm exec vitest run \
@@ -66,7 +66,22 @@ jobs:
             src/services/reconciliation.bench.ts \
             src/services/llm-client.test.ts \
             src/steelo-integration.test.ts \
-            src/phase2-integration.test.ts
+            src/phase2-integration.test.ts \
+            src/services/parse-warnings.test.ts \
+            src/services/anomaly-detector.test.ts \
+            src/services/line-notifier.test.ts \
+            src/services/pdf-generator.test.ts \
+            src/phase3-integration.test.ts
+
+      - name: STEELO Phase 3 PDF bench (fixture font 必要、無ければ skip)
+        run: |
+          cd apps/worker
+          # Noto Sans JP TTF を取得 (失敗しても bench は describe.skipIf で skip するので継続)
+          mkdir -p tests/fixtures
+          curl -fsSL -o tests/fixtures/NotoSansJP-Regular.ttf \
+            "https://github.com/googlefonts/noto-cjk/raw/main/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf" \
+            || echo "[ci] font download failed, bench will be skipped"
+          pnpm exec vitest run src/services/pdf-generator.bench.ts || true
 
       - name: STEELO db ユニットテスト
         run: |
