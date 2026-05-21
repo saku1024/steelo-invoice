@@ -7,24 +7,43 @@
 // 配車パターンの例だけを load する。Anthropic prompt caching が効くよう、
 // system プロンプトは静的に固定する。
 
+/**
+ * prompt 内容（system + user 構造）のバージョン番号。プロンプト本体を変えたら bump する。
+ * モデル ID 自体は MODEL_NAME で別管理しているので、モデル切替だけでは bump しない。
+ */
 export const CURRENT_PROMPT_VERSION = 1;
 
-export const MODEL_NAME = 'claude-3-haiku-20240307';
+/**
+ * Claude Haiku 4.5 (2025-10-01). 旧 claude-3-haiku-20240307 は 2026-04-20 に
+ * Anthropic が retired したため使えない（Codex Phase 2 review CRITICAL #1）。
+ */
+export const MODEL_NAME = 'claude-haiku-4-5-20251001';
 
 /**
- * 概算コスト（Claude Haiku 2024-03 価格）:
- *   input: $0.25 / 1M tokens、output: $1.25 / 1M tokens
+ * 概算コスト（Claude Haiku 4.5 価格、2026 時点）:
+ *   input: $1.00 / 1M tokens、output: $5.00 / 1M tokens
+ *   prompt cache read は $0.10 / 1M tokens（90% off）
  *   月 1,000 件 × 平均 500 input + 200 output tokens
- *   = 500,000 input + 200,000 output → $0.125 + $0.25 = $0.375
- *   ≒ ¥56（プロンプトキャッシュ込みでさらに減少）
+ *   = 500,000 input + 200,000 output → $0.50 + $1.00 = $1.50
+ *   ≒ ¥225（prompt cache 50% 適用で ¥150 程度）
  */
-export const PRICE_INPUT_PER_M_TOKENS_USD = 0.25;
-export const PRICE_OUTPUT_PER_M_TOKENS_USD = 1.25;
+export const PRICE_INPUT_PER_M_TOKENS_USD = 1.0;
+export const PRICE_OUTPUT_PER_M_TOKENS_USD = 5.0;
+/** cache_read は input の 10%、cache_creation は input の 1.25 倍 */
+export const PRICE_CACHE_READ_PER_M_TOKENS_USD = 0.1;
+export const PRICE_CACHE_WRITE_PER_M_TOKENS_USD = 1.25;
 
-export function estimateCostUsd(input: number, output: number): number {
+export function estimateCostUsd(
+  input: number,
+  output: number,
+  cacheRead = 0,
+  cacheWrite = 0
+): number {
   return (
     (input / 1_000_000) * PRICE_INPUT_PER_M_TOKENS_USD +
-    (output / 1_000_000) * PRICE_OUTPUT_PER_M_TOKENS_USD
+    (output / 1_000_000) * PRICE_OUTPUT_PER_M_TOKENS_USD +
+    (cacheRead / 1_000_000) * PRICE_CACHE_READ_PER_M_TOKENS_USD +
+    (cacheWrite / 1_000_000) * PRICE_CACHE_WRITE_PER_M_TOKENS_USD
   );
 }
 

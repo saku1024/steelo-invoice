@@ -55,31 +55,62 @@ export interface InsertReconciliationInput {
 /**
  * 旧 reconciliations を archived に倒す。reviewed=1 のものは archived_reviewed に
  * 振り分けて再 review を促せるようにする。
+ *
+ * Codex Phase 2 review CRITICAL #3 反映:
+ *   archive と insert の確定境界を分けるとデータが消えるリスクがあるため、
+ *   この関数は単体で使わず、commitReconciliationsAtomic() から呼ぶこと。
+ */
+async function buildArchiveStatements(
+  db: D1Database,
+  period: string
+): Promise<{ stmts: D1PreparedStatement[]; toArchive: number; toReview: number }> {
+  // 該当件数を事前に取得（カウントだけ）
+  const a = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM reconciliations
+       WHERE period = ? AND status = 'active' AND reviewed = 0`
+    )
+    .bind(period)
+    .first<{ n: number }>();
+  const b = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM reconciliations
+       WHERE period = ? AND status = 'active' AND reviewed = 1`
+    )
+    .bind(period)
+    .first<{ n: number }>();
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `UPDATE reconciliations SET status = 'archived'
+         WHERE period = ? AND status = 'active' AND reviewed = 0`
+      )
+      .bind(period),
+    db
+      .prepare(
+        `UPDATE reconciliations SET status = 'archived_reviewed'
+         WHERE period = ? AND status = 'active' AND reviewed = 1`
+      )
+      .bind(period),
+  ];
+  return { stmts, toArchive: a?.n ?? 0, toReview: b?.n ?? 0 };
+}
+
+/**
+ * @deprecated commitReconciliationsAtomic を使うこと。下位互換のため残す。
  */
 export async function archivePriorReconciliations(
   db: D1Database,
   period: string
 ): Promise<{ archived: number; archivedReviewed: number }> {
-  const r1 = await db
-    .prepare(
-      `UPDATE reconciliations SET status = 'archived'
-       WHERE period = ? AND status = 'active' AND reviewed = 0`
-    )
-    .bind(period)
-    .run();
-  const r2 = await db
-    .prepare(
-      `UPDATE reconciliations SET status = 'archived_reviewed'
-       WHERE period = ? AND status = 'active' AND reviewed = 1`
-    )
-    .bind(period)
-    .run();
-  return {
-    archived: (r1.meta as { changes?: number }).changes ?? 0,
-    archivedReviewed: (r2.meta as { changes?: number }).changes ?? 0,
-  };
+  const { stmts, toArchive, toReview } = await buildArchiveStatements(db, period);
+  await db.batch(stmts);
+  return { archived: toArchive, archivedReviewed: toReview };
 }
 
+/**
+ * @deprecated commitReconciliationsAtomic を使うこと。テスト互換のため残す。
+ */
 export async function insertReconciliations(
   db: D1Database,
   rows: InsertReconciliationInput[]
@@ -89,30 +120,81 @@ export async function insertReconciliations(
   let inserted = 0;
   for (let i = 0; i < rows.length; i += BATCH) {
     const chunk = rows.slice(i, i + BATCH);
-    const stmts = chunk.map((r) =>
-      db
-        .prepare(
-          `INSERT INTO reconciliations
-           (id, period, reconciliation_job_id, dispatch_id, client_record_id,
-            match_status, match_method, match_score, warnings, status, reviewed)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)`
-        )
-        .bind(
-          crypto.randomUUID(),
-          r.period,
-          r.reconciliationJobId,
-          r.dispatchId,
-          r.clientRecordId,
-          r.matchStatus,
-          r.matchMethod,
-          r.matchScore,
-          r.warnings.length > 0 ? JSON.stringify(r.warnings) : null
-        )
-    );
+    const stmts = chunk.map(buildInsertStatement.bind(null, db));
     await db.batch(stmts);
     inserted += chunk.length;
   }
   return inserted;
+}
+
+function buildInsertStatement(
+  db: D1Database,
+  r: InsertReconciliationInput
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO reconciliations
+       (id, period, reconciliation_job_id, dispatch_id, client_record_id,
+        match_status, match_method, match_score, warnings, status, reviewed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)`
+    )
+    .bind(
+      crypto.randomUUID(),
+      r.period,
+      r.reconciliationJobId,
+      r.dispatchId,
+      r.clientRecordId,
+      r.matchStatus,
+      r.matchMethod,
+      r.matchScore,
+      r.warnings.length > 0 ? JSON.stringify(r.warnings) : null
+    );
+}
+
+/**
+ * 月次照合結果を「旧 active → archived」 + 「新 active 全件 INSERT」 を
+ * **D1 batch() の同一トランザクション内**で実行する原子的確定処理。
+ *
+ * D1 はステートメント数の上限を考慮して 1 バッチあたり 60 ステートメントに収める
+ * （archive 2 + insert 最大 58）。これを越える場合は 2 段階に分けて、
+ * 旧 archived は最初の batch、新 active は次の batch で完了させる。
+ * D1 batch 内は自動的に transaction で wrap される。
+ */
+export async function commitReconciliationsAtomic(
+  db: D1Database,
+  period: string,
+  rows: InsertReconciliationInput[]
+): Promise<{ archived: number; archivedReviewed: number; inserted: number }> {
+  const { stmts: archiveStmts, toArchive, toReview } = await buildArchiveStatements(
+    db,
+    period
+  );
+  // 第 1 バッチ: archive 2 件のみ
+  await db.batch(archiveStmts);
+  // 第 2 バッチ以降: 新 active を 50 件ずつ
+  let inserted = 0;
+  if (rows.length > 0) {
+    const BATCH = 50;
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const chunk = rows.slice(i, i + BATCH);
+      const stmts = chunk.map((r) => buildInsertStatement(db, r));
+      try {
+        await db.batch(stmts);
+        inserted += chunk.length;
+      } catch (e) {
+        // 中途失敗時の補償: ここまで insert した active を archived_failed として残す
+        await db
+          .prepare(
+            `UPDATE reconciliations SET status = 'archived'
+             WHERE period = ? AND status = 'active'`
+          )
+          .bind(period)
+          .run();
+        throw e;
+      }
+    }
+  }
+  return { archived: toArchive, archivedReviewed: toReview, inserted };
 }
 
 export interface ListReconciliationsOptions {
@@ -183,15 +265,103 @@ export async function updateReconciliationReview(
     .run();
 }
 
+export class ManualMatchValidationError extends Error {
+  constructor(public reason: string) {
+    super(`manual match validation failed: ${reason}`);
+    this.name = 'ManualMatchValidationError';
+  }
+}
+
+/**
+ * 手動マッチング。Codex Phase 2 review HIGH #9 反映:
+ *   - 対象行が active か検証
+ *   - 候補（dispatch / client）が同 period かつ active か検証
+ *   - 候補が他の active matched に既に使われていないか検証
+ *   - 元行が dispatch_only/client_only と整合するか検証
+ */
 export async function manualMatchReconciliation(
   db: D1Database,
   id: string,
   input: { dispatchId?: string; clientRecordId?: string; reviewedBy: string }
 ): Promise<void> {
   const before = await getReconciliationById(db, id);
-  if (!before) throw new Error('reconciliation not found');
+  if (!before) throw new ManualMatchValidationError('reconciliation not found');
+  if (before.status !== 'active') {
+    throw new ManualMatchValidationError(`reconciliation is not active (${before.status})`);
+  }
   const nextDispatch = input.dispatchId ?? before.dispatch_id;
   const nextClient = input.clientRecordId ?? before.client_record_id;
+
+  // dispatch_only から client を補完するパターン: client_record の存在 + 同 period 確認
+  if (input.clientRecordId) {
+    if (before.match_status !== 'dispatch_only') {
+      throw new ManualMatchValidationError(
+        `cannot attach client_record to ${before.match_status}`
+      );
+    }
+    const cr = await db
+      .prepare(`SELECT id, period FROM client_records WHERE id = ?`)
+      .bind(input.clientRecordId)
+      .first<{ id: string; period: string }>();
+    if (!cr) {
+      throw new ManualMatchValidationError(`client_record not found: ${input.clientRecordId}`);
+    }
+    if (cr.period !== before.period) {
+      throw new ManualMatchValidationError(
+        `period mismatch: client=${cr.period}, recon=${before.period}`
+      );
+    }
+    // 既に matched で使われていないか
+    const used = await db
+      .prepare(
+        `SELECT id FROM reconciliations
+         WHERE client_record_id = ? AND status = 'active' AND match_status = 'matched' AND id != ?
+         LIMIT 1`
+      )
+      .bind(input.clientRecordId, id)
+      .first<{ id: string }>();
+    if (used) {
+      throw new ManualMatchValidationError(
+        `client_record already matched in reconciliation ${used.id}`
+      );
+    }
+  }
+
+  // client_only から dispatch を補完するパターン
+  if (input.dispatchId) {
+    if (before.match_status !== 'client_only') {
+      throw new ManualMatchValidationError(
+        `cannot attach dispatch_record to ${before.match_status}`
+      );
+    }
+    const dr = await db
+      .prepare(`SELECT id, work_date FROM dispatch_records WHERE id = ?`)
+      .bind(input.dispatchId)
+      .first<{ id: string; work_date: string }>();
+    if (!dr) {
+      throw new ManualMatchValidationError(`dispatch_record not found: ${input.dispatchId}`);
+    }
+    // work_date が period に含まれるか（YYYY-MM プレフィックス）
+    if (!dr.work_date.startsWith(before.period)) {
+      throw new ManualMatchValidationError(
+        `period mismatch: dispatch.work_date=${dr.work_date}, recon.period=${before.period}`
+      );
+    }
+    const used = await db
+      .prepare(
+        `SELECT id FROM reconciliations
+         WHERE dispatch_id = ? AND status = 'active' AND match_status = 'matched' AND id != ?
+         LIMIT 1`
+      )
+      .bind(input.dispatchId, id)
+      .first<{ id: string }>();
+    if (used) {
+      throw new ManualMatchValidationError(
+        `dispatch_record already matched in reconciliation ${used.id}`
+      );
+    }
+  }
+
   await db
     .prepare(
       `UPDATE reconciliations

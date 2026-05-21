@@ -1,8 +1,7 @@
 // STEELO Phase 2 F4: 月次照合ジョブ。Queues consumer / Scheduled fallback から
 // 1 ジョブを実行する。
 import {
-  archivePriorReconciliations,
-  insertReconciliations,
+  commitReconciliationsAtomic,
   markReconciliationJobCompleted,
   markReconciliationJobFailed,
   tryMarkReconciliationJobRunning,
@@ -47,10 +46,10 @@ export async function runReconciliationJob(
       clientRecords,
     });
 
-    // 旧結果を archived に
-    await archivePriorReconciliations(env.DB, job.period);
-
-    // 新規結果を INSERT
+    // Codex Phase 2 review CRITICAL #3 反映:
+    // 旧 active を archived へ → 新 active を bulk INSERT を、commitReconciliationsAtomic
+    // で D1 batch 単位で原子的に実行する。中途失敗時は active 全件を archived に
+    // 倒して整合性を確保する補償処理込み。
     const inputs = rows.map((r) => ({
       period: job.period,
       reconciliationJobId: jobId,
@@ -61,7 +60,7 @@ export async function runReconciliationJob(
       matchScore: r.matchScore,
       warnings: r.warnings,
     }));
-    await insertReconciliations(env.DB, inputs);
+    await commitReconciliationsAtomic(env.DB, job.period, inputs);
 
     await markReconciliationJobCompleted(env.DB, jobId, {
       dispatchCount: dispatches.length,

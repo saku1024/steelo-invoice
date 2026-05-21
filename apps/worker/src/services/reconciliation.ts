@@ -60,6 +60,11 @@ const SCORE_TIME = 0.5;
 /**
  * 月次照合のメインエントリ。dispatch + client の組合せを 3 分類に分けた行配列を返す。
  * 同じ dispatch / client が複数行に出ない（1 対 1 マッチを保証）。
+ *
+ * Codex Phase 2 review HIGH #10 反映:
+ *   client 順序依存の greedy ではなく、全 edge をスコア化してから score 降順で
+ *   1 対 1 を確定する「greedy-on-edge」方式に変更。同点は client_record の
+ *   作成順（id 昇順）でタイブレーク。
  */
 export function reconcile(input: MatchInput): {
   rows: MatchResultRow[];
@@ -67,9 +72,6 @@ export function reconcile(input: MatchInput): {
 } {
   const { dispatches, clientRecords } = input;
   const fareDeviationThreshold = input.fareDeviationThreshold ?? 0.5;
-
-  const dispatchUsed = new Set<string>();
-  const clientUsed = new Set<string>();
   const rows: MatchResultRow[] = [];
 
   // 同 driver の運賃中央値（warnings 用）
@@ -84,59 +86,78 @@ export function reconcile(input: MatchInput): {
     else dispatchIndex.set(key, [d]);
   }
 
-  // client_records を順に処理してマッチを探す
+  // 1. 全 edge を生成（driver_id, date が一致する client × dispatch の組合せのみ）
+  interface Edge {
+    clientId: string;
+    dispatchId: string;
+    method: MatchMethod;
+    score: number;
+  }
+  const edges: Edge[] = [];
+  const skipClientReason = new Map<string, string>(); // client_only の事前確定用
+
   for (const cr of clientRecords) {
     if (cr.driver_id === null) {
-      // 未紐付け client は client_only として記録
-      rows.push({
-        dispatchId: null,
-        clientRecordId: cr.id,
-        matchStatus: 'client_only',
-        matchMethod: 'none',
-        matchScore: 0,
-        warnings: ['client record has no driver_id'],
-      });
-      clientUsed.add(cr.id);
+      skipClientReason.set(cr.id, 'client record has no driver_id');
       continue;
     }
-
     const dateStr = clientDateString(cr.period, cr.work_day);
     if (!dateStr) {
+      skipClientReason.set(cr.id, 'invalid work_day for period');
+      continue;
+    }
+    const candidates = dispatchIndex.get(`${cr.driver_id}|${dateStr}`) ?? [];
+    for (const d of candidates) {
+      const j = judge(d, cr);
+      if (j.score > 0) {
+        edges.push({ clientId: cr.id, dispatchId: d.id, method: j.method, score: j.score });
+      }
+    }
+  }
+
+  // 2. score 降順 + (clientId, dispatchId) でタイブレーク（決定論性確保）
+  edges.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (a.clientId !== b.clientId) return a.clientId < b.clientId ? -1 : 1;
+    return a.dispatchId < b.dispatchId ? -1 : 1;
+  });
+
+  // 3. greedy-on-edge: 既に使われた client / dispatch はスキップして 1-1 マッチング
+  const dispatchUsed = new Set<string>();
+  const clientUsed = new Set<string>();
+  const matchedByClient = new Map<string, Edge>();
+  for (const e of edges) {
+    if (clientUsed.has(e.clientId) || dispatchUsed.has(e.dispatchId)) continue;
+    clientUsed.add(e.clientId);
+    dispatchUsed.add(e.dispatchId);
+    matchedByClient.set(e.clientId, e);
+  }
+
+  // 4. 全 client を順に処理 → matched / client_only に振り分け
+  const dispatchById = new Map(dispatches.map((d) => [d.id, d]));
+  for (const cr of clientRecords) {
+    const skip = skipClientReason.get(cr.id);
+    if (skip) {
       rows.push({
         dispatchId: null,
         clientRecordId: cr.id,
         matchStatus: 'client_only',
         matchMethod: 'none',
         matchScore: 0,
-        warnings: ['invalid work_day for period'],
+        warnings: [skip],
       });
-      clientUsed.add(cr.id);
       continue;
     }
-
-    const candidates =
-      dispatchIndex.get(`${cr.driver_id}|${dateStr}`)?.filter((d) => !dispatchUsed.has(d.id)) ??
-      [];
-
-    let best: { dispatch: DispatchLike; method: MatchMethod; score: number } | null = null;
-    for (const d of candidates) {
-      const judgement = judge(d, cr);
-      if (!best || judgement.score > best.score) {
-        best = { dispatch: d, ...judgement };
-      }
-    }
-
-    const warnings = collectWarnings(cr, best?.dispatch, fareMedianByDriver, fareDeviationThreshold);
-
-    if (best && best.score > 0) {
-      dispatchUsed.add(best.dispatch.id);
-      clientUsed.add(cr.id);
+    const matchedEdge = matchedByClient.get(cr.id);
+    const matchedDispatch = matchedEdge ? dispatchById.get(matchedEdge.dispatchId) : undefined;
+    const warnings = collectWarnings(cr, matchedDispatch, fareMedianByDriver, fareDeviationThreshold);
+    if (matchedEdge) {
       rows.push({
-        dispatchId: best.dispatch.id,
+        dispatchId: matchedEdge.dispatchId,
         clientRecordId: cr.id,
         matchStatus: 'matched',
-        matchMethod: best.method,
-        matchScore: best.score,
+        matchMethod: matchedEdge.method,
+        matchScore: matchedEdge.score,
         warnings,
       });
     } else {
@@ -148,11 +169,10 @@ export function reconcile(input: MatchInput): {
         matchScore: 0,
         warnings,
       });
-      clientUsed.add(cr.id);
     }
   }
 
-  // 未マッチの dispatch を dispatch_only として追加
+  // 5. 未マッチの dispatch を dispatch_only として追加
   for (const d of dispatches) {
     if (!dispatchUsed.has(d.id)) {
       rows.push({

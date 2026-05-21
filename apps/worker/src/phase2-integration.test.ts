@@ -16,6 +16,9 @@ import {
   insertReconciliations,
   listReconciliations,
   archivePriorReconciliations,
+  commitReconciliationsAtomic,
+  manualMatchReconciliation,
+  ManualMatchValidationError,
   getDispatchesForPeriod,
   getClientRecordsForReconcilePeriod,
   createDispatchRecord,
@@ -447,5 +450,284 @@ describe('Integration: get*ForReconcilePeriod ヘルパ', () => {
     const rows = await getClientRecordsForReconcilePeriod(h.db, '2026-05');
     expect(rows).toHaveLength(1);
     expect(rows[0].fare).toBe(1000);
+  });
+});
+
+describe('Integration: Codex Phase 2 review CRITICAL fixes', () => {
+  it('CRITICAL #2: 再 parse で auto/needs_review の dispatch_records が重複しない', async () => {
+    const d = await createDriver(h.db, { name: 'A', lineGroupId: 'G_a' });
+    const ins = await insertLineMessageIgnoreDup(h.db, {
+      groupId: 'G_a',
+      driverId: d.id,
+      messageId: 'm-redo',
+      messageType: 'text',
+      messageText: '田中さん 明日 ①築地チャーター 06:00 東京 集荷',
+      receivedAt: '2026-05-19T22:00:00+09:00',
+    });
+    const client = {
+      messages: {
+        create: vi.fn(async () => ({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                isDispatch: true,
+                confidence: 'high',
+                records: [
+                  { taskName: '築地チャーター', workDate: '2026-05-20', startTime: '06:00' },
+                ],
+              }),
+            },
+          ],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        })),
+      },
+    } as never;
+    const env = { DB: h.db } as { DB: D1Database } & Record<string, unknown>;
+    await handleLLMParseJob(env as never, { lineMessageId: ins.id }, { client });
+    await handleLLMParseJob(env as never, { lineMessageId: ins.id }, { client });
+    await handleLLMParseJob(env as never, { lineMessageId: ins.id }, { client });
+    // 3 回呼んでも dispatch_records は 1 件のまま
+    const cnt = await h.db
+      .prepare(`SELECT COUNT(*) AS n FROM dispatch_records WHERE raw_message_id = ?`)
+      .bind(ins.id)
+      .first<{ n: number }>();
+    expect(cnt!.n).toBe(1);
+  });
+
+  it('CRITICAL #2: confirmed 状態の dispatch_records は再 parse で消えない', async () => {
+    const d = await createDriver(h.db, { name: 'A', lineGroupId: 'G_a' });
+    const ins = await insertLineMessageIgnoreDup(h.db, {
+      groupId: 'G_a',
+      driverId: d.id,
+      messageId: 'm-conf',
+      messageType: 'text',
+      messageText: '配車のお知らせ 明日 業務A 06:00 東京 集荷',
+    });
+    // 既存 confirmed dispatch
+    await createDispatchRecord(h.db, {
+      driverId: d.id,
+      workDate: '2026-05-20',
+      taskName: '業務A',
+      rawMessageId: ins.id,
+      status: 'confirmed',
+    });
+    const client = {
+      messages: {
+        create: vi.fn(async () => ({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                isDispatch: true,
+                confidence: 'high',
+                records: [{ taskName: '業務B', workDate: '2026-05-20', startTime: '06:00' }],
+              }),
+            },
+          ],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        })),
+      },
+    } as never;
+    const env = { DB: h.db } as { DB: D1Database } & Record<string, unknown>;
+    await handleLLMParseJob(env as never, { lineMessageId: ins.id }, { client });
+    // confirmed 1 + new auto 1
+    const all = await h.db
+      .prepare(`SELECT task_name, status FROM dispatch_records WHERE raw_message_id = ? ORDER BY status`)
+      .bind(ins.id)
+      .all<{ task_name: string; status: string }>();
+    expect(all.results).toHaveLength(2);
+    expect(all.results.map((r) => r.status).sort()).toEqual(['auto', 'confirmed']);
+    expect(all.results.find((r) => r.status === 'confirmed')!.task_name).toBe('業務A');
+  });
+
+  it('CRITICAL #3: commitReconciliationsAtomic で archive + insert が一貫', async () => {
+    const job1 = await createReconciliationJob(h.db, { period: '2026-05', requestedBy: 's' });
+    await commitReconciliationsAtomic(h.db, '2026-05', [
+      {
+        period: '2026-05',
+        reconciliationJobId: job1.id,
+        dispatchId: null,
+        clientRecordId: null,
+        matchStatus: 'dispatch_only',
+        matchMethod: 'none',
+        matchScore: 0,
+        warnings: [],
+      },
+    ]);
+    const r1 = await listReconciliations(h.db, { period: '2026-05' });
+    expect(r1.total).toBe(1);
+
+    // 第 2 回: 旧 active が archived に倒れ、新 active が入る
+    await h.db
+      .prepare(`UPDATE reconciliation_jobs SET status='completed' WHERE id=?`)
+      .bind(job1.id)
+      .run();
+    const job2 = await createReconciliationJob(h.db, { period: '2026-05', requestedBy: 's' });
+    await commitReconciliationsAtomic(h.db, '2026-05', [
+      {
+        period: '2026-05',
+        reconciliationJobId: job2.id,
+        dispatchId: null,
+        clientRecordId: null,
+        matchStatus: 'client_only',
+        matchMethod: 'none',
+        matchScore: 0,
+        warnings: [],
+      },
+      {
+        period: '2026-05',
+        reconciliationJobId: job2.id,
+        dispatchId: null,
+        clientRecordId: null,
+        matchStatus: 'matched',
+        matchMethod: 'strong',
+        matchScore: 1,
+        warnings: [],
+      },
+    ]);
+    const active = await listReconciliations(h.db, { period: '2026-05', status: 'active' });
+    expect(active.total).toBe(2);
+    const archived = await listReconciliations(h.db, { period: '2026-05', status: 'archived' });
+    expect(archived.total).toBe(1);
+  });
+});
+
+describe('Integration: Codex Phase 2 review HIGH fixes', () => {
+  it('HIGH #6: UPSERT が並行 invocation で UNIQUE 違反にならない', async () => {
+    const d = await createDriver(h.db, { name: 'A', lineGroupId: 'G_a' });
+    const ins = await insertLineMessageIgnoreDup(h.db, {
+      groupId: 'G_a',
+      driverId: d.id,
+      messageId: 'm-upsert',
+      messageType: 'text',
+      messageText: 'hello world test',
+    });
+    // 同時に複数 UPSERT
+    await Promise.all(
+      Array.from({ length: 5 }, () =>
+        upsertLLMParseResult(h.db, {
+          lineMessageId: ins.id,
+          modelName: 'm',
+          promptVersion: 1,
+          inputJson: '{}',
+          outputJson: null,
+          status: 'success',
+          errorMessage: null,
+          tokenInput: 10,
+          tokenOutput: 5,
+          costUsd: 0.0001,
+        })
+      )
+    );
+    // 1 行のみ存在し、attempt_count >= 5
+    const cnt = await h.db
+      .prepare(`SELECT COUNT(*) AS n, MAX(attempt_count) AS max_a FROM llm_parse_results WHERE line_message_id = ?`)
+      .bind(ins.id)
+      .first<{ n: number; max_a: number }>();
+    expect(cnt!.n).toBe(1);
+    expect(cnt!.max_a).toBeGreaterThanOrEqual(5);
+  });
+
+  it('HIGH #7: LLM が isDispatch=true でも driver 未解決時は is_parsed=0 のまま残す', async () => {
+    const ins = await insertLineMessageIgnoreDup(h.db, {
+      groupId: 'G_unknown', // ドライバーマスタに無いグループ
+      messageId: 'm-no-driver',
+      messageType: 'text',
+      messageText: '配車のお知らせ 明日 業務A 06:00 東京 集荷',
+    });
+    const client = {
+      messages: {
+        create: vi.fn(async () => ({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                isDispatch: true,
+                confidence: 'high',
+                records: [{ taskName: '業務A', workDate: '2026-05-20', startTime: '06:00' }],
+              }),
+            },
+          ],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        })),
+      },
+    } as never;
+    const env = { DB: h.db } as { DB: D1Database } & Record<string, unknown>;
+    const r = await handleLLMParseJob(env as never, { lineMessageId: ins.id }, { client });
+    expect(r.dispatchRecordIds).toHaveLength(0);
+    const lm = await h.db
+      .prepare(`SELECT is_parsed, is_dispatch FROM line_messages WHERE id=?`)
+      .bind(ins.id)
+      .first<{ is_parsed: number; is_dispatch: number }>();
+    // is_dispatch=1 で記録するが is_parsed=0 のまま（driver_alias 追加後に再 parse 可能）
+    expect(lm!.is_parsed).toBe(0);
+    expect(lm!.is_dispatch).toBe(1);
+  });
+
+  it('HIGH #11: 不完全 records (taskName 欠落) は confidence=high でも needs_review に倒す', async () => {
+    const d = await createDriver(h.db, { name: 'A', lineGroupId: 'G_a' });
+    const ins = await insertLineMessageIgnoreDup(h.db, {
+      groupId: 'G_a',
+      driverId: d.id,
+      messageId: 'm-incomp',
+      messageType: 'text',
+      messageText: '配車のお知らせ 明日 06:00 東京 集荷',
+    });
+    const client = {
+      messages: {
+        create: vi.fn(async () => ({
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                isDispatch: true,
+                confidence: 'high', // LLM は high と言うが…
+                records: [{ taskName: null, workDate: '2026-05-20', startTime: '06:00' }],
+              }),
+            },
+          ],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        })),
+      },
+    } as never;
+    const env = { DB: h.db } as { DB: D1Database } & Record<string, unknown>;
+    const r = await handleLLMParseJob(env as never, { lineMessageId: ins.id }, { client });
+    const dr = await h.db
+      .prepare(`SELECT status, confidence FROM dispatch_records WHERE id=?`)
+      .bind(r.dispatchRecordIds[0])
+      .first<{ status: string; confidence: string }>();
+    // taskName 欠落 → needs_review + confidence=low に強制
+    expect(dr!.status).toBe('needs_review');
+    expect(dr!.confidence).toBe('low');
+  });
+
+  it('HIGH #9: manual match で別 period の dispatch を弾く', async () => {
+    const job = await createReconciliationJob(h.db, { period: '2026-05', requestedBy: 's' });
+    await commitReconciliationsAtomic(h.db, '2026-05', [
+      {
+        period: '2026-05',
+        reconciliationJobId: job.id,
+        dispatchId: null,
+        clientRecordId: null,
+        matchStatus: 'client_only',
+        matchMethod: 'none',
+        matchScore: 0,
+        warnings: [],
+      },
+    ]);
+    const recon = (await listReconciliations(h.db, { period: '2026-05' })).items[0];
+    const d = await createDriver(h.db, { name: 'A' });
+    const otherDispatch = await createDispatchRecord(h.db, {
+      driverId: d.id,
+      workDate: '2026-06-15', // 別 period
+      taskName: 'X',
+    });
+    await expect(
+      manualMatchReconciliation(h.db, recon.id, {
+        dispatchId: otherDispatch.id,
+        reviewedBy: 's',
+      })
+    ).rejects.toBeInstanceOf(ManualMatchValidationError);
   });
 });

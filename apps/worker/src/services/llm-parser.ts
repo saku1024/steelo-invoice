@@ -19,6 +19,7 @@ import {
   getDriverByLineGroupId,
   upsertLLMParseResult,
   createDispatchRecord,
+  deleteDispatchRecordsByRawMessageId,
 } from '@line-crm/db';
 import {
   CURRENT_PROMPT_VERSION,
@@ -163,12 +164,18 @@ export async function handleLLMParseJob(
     };
   }
 
-  // 結果保存
+  // 結果保存（input は再解析できる程度に保持: prompt version + driver hint 等）
+  const inputSnapshot = JSON.stringify({
+    text: message.message_text.slice(0, 4000),
+    receivedAt: message.received_at,
+    promptVersion: resp.promptVersion,
+    driverHint: driverHint ? { id: driverHint.id, name: driverHint.name } : null,
+  });
   await upsertLLMParseResult(env.DB, {
     lineMessageId,
     modelName: resp.modelName,
     promptVersion: resp.promptVersion,
-    inputJson: JSON.stringify({ text: message.message_text.slice(0, 4000) }),
+    inputJson: inputSnapshot,
     outputJson: resp.rawJson,
     status: 'success',
     errorMessage: null,
@@ -177,20 +184,58 @@ export async function handleLLMParseJob(
     costUsd: resp.tokenUsage.costUsd,
   });
 
+  // Codex Phase 2 review CRITICAL #2 反映:
+  // 同 line_message から作られた auto/needs_review の dispatch_records を一度削除し、
+  // 重複生成を防ぐ。confirmed 状態のレコードは保護。
+  await deleteDispatchRecordsByRawMessageId(env.DB, lineMessageId);
+
   const dispatchIds: string[] = [];
-  if (resp.parsed.isDispatch && resp.parsed.records.length > 0) {
+  // Codex Phase 2 review HIGH #7 反映:
+  // driver 未解決でも isDispatch=true なら is_parsed=0 のまま needs_review に残し、
+  // 運用者が driver_alias を追加して再 parse できるようにする。
+  if (resp.parsed.isDispatch) {
     const baseDriverId =
       message.driver_id ?? driverHint?.id ?? null;
-    if (baseDriverId) {
-      const status =
-        resp.parsed.confidence === 'low' ? 'needs_review' : 'auto';
+    if (baseDriverId && resp.parsed.records.length > 0) {
       for (const r of resp.parsed.records) {
-        // workDate が無ければ メッセージ受信日（JST）を使う
-        const workDate = r.workDate ?? extractDateFromReceivedAt(message.received_at);
-        if (!workDate) continue;
+        // Codex Phase 2 review MEDIUM #12 反映:
+        // workDate 欠落は補完せず needs_review に倒す（受信日とは別日の可能性が
+        // 「明日の案件」では当たり前のため）
+        if (!r.workDate) {
+          // workDate 無い records は status='needs_review' でメタデータのみ保存
+          const fallbackDate = extractDateFromReceivedAt(message.received_at);
+          if (!fallbackDate) continue;
+          const row = await createDispatchRecord(env.DB, {
+            driverId: baseDriverId,
+            workDate: fallbackDate,
+            taskNumber: r.taskNumber ?? null,
+            taskName: r.taskName ?? null,
+            pickupLocation: r.pickupLocation ?? null,
+            deliveryLocation: r.deliveryLocation ?? null,
+            startTime: r.startTime ?? null,
+            endTime: r.endTime ?? null,
+            managementNumber: r.managementNumber ?? null,
+            rawMessageId: lineMessageId,
+            status: 'needs_review',
+          });
+          await env.DB
+            .prepare(`UPDATE dispatch_records SET confidence = ? WHERE id = ?`)
+            .bind('low', row.id)
+            .run();
+          dispatchIds.push(row.id);
+          continue;
+        }
+        // Codex Phase 2 review HIGH #11 反映:
+        // 必須フィールド（taskName + startTime のどちらか）が欠落していたら
+        // confidence に関わらず needs_review に倒す
+        const incomplete = !r.taskName || !r.startTime;
+        const status =
+          incomplete || resp.parsed.confidence === 'low'
+            ? 'needs_review'
+            : 'auto';
         const row = await createDispatchRecord(env.DB, {
           driverId: baseDriverId,
-          workDate,
+          workDate: r.workDate,
           taskNumber: r.taskNumber ?? null,
           taskName: r.taskName ?? null,
           pickupLocation: r.pickupLocation ?? null,
@@ -201,21 +246,39 @@ export async function handleLLMParseJob(
           rawMessageId: lineMessageId,
           status,
         });
-        // confidence は手動で UPDATE（createDispatchRecord に option を増やしてもよい）
+        // confidence: 不完全なら low、それ以外は LLM の出力に従う
+        const effectiveConfidence = incomplete ? 'low' : resp.parsed.confidence;
         await env.DB
           .prepare(`UPDATE dispatch_records SET confidence = ? WHERE id = ?`)
-          .bind(resp.parsed.confidence, row.id)
+          .bind(effectiveConfidence, row.id)
           .run();
         dispatchIds.push(row.id);
       }
     }
+    // driver 未解決 or records=0 で isDispatch=true の場合は line_messages.is_parsed=0
+    // のままにして、driver_alias 追加 or 手動 reparse で再試行可能にする
+    if (!baseDriverId || resp.parsed.records.length === 0) {
+      await env.DB
+        .prepare(
+          `UPDATE line_messages SET is_dispatch = 1 WHERE id = ?`
+        )
+        .bind(lineMessageId)
+        .run();
+    } else {
+      await env.DB
+        .prepare(
+          `UPDATE line_messages SET is_parsed = 1, is_dispatch = 1 WHERE id = ?`
+        )
+        .bind(lineMessageId)
+        .run();
+    }
+  } else {
+    // 非配車メッセージは is_parsed=1, is_dispatch=0 で確定
+    await env.DB
+      .prepare(`UPDATE line_messages SET is_parsed = 1, is_dispatch = 0 WHERE id = ?`)
+      .bind(lineMessageId)
+      .run();
   }
-
-  // line_messages の is_parsed / is_dispatch を更新
-  await env.DB
-    .prepare(`UPDATE line_messages SET is_parsed = 1, is_dispatch = ? WHERE id = ?`)
-    .bind(resp.parsed.isDispatch ? 1 : 0, lineMessageId)
-    .run();
 
   // 監査
   try {

@@ -141,6 +141,44 @@ describe('reconcile', () => {
     expect(r.summary.clientOnly).toBe(1);
   });
 
+  it('greedy-on-edge: 順序に関わらず score が高い strong > fuzzy > time の順でマッチ', () => {
+    // fuzzy client が先、strong client が後 → 旧 greedy は fuzzy にマッチして
+    // strong が client_only になっていた。新 greedy-on-edge は strong を優先。
+    const r = reconcile({
+      dispatches: [baseDispatch('d-1', { task_name: '築地チャーター' })],
+      clientRecords: [
+        baseClient('c-fuzzy', { task_name: '築字チャーター' }), // fuzzy (0.7)
+        baseClient('c-strong', { task_name: '築地チャーター' }), // strong (1.0)
+      ],
+    });
+    expect(r.summary.matched).toBe(1);
+    const matched = r.rows.find((row) => row.matchStatus === 'matched')!;
+    expect(matched.clientRecordId).toBe('c-strong');
+    expect(matched.matchMethod).toBe('strong');
+    const clientOnly = r.rows.find((row) => row.matchStatus === 'client_only')!;
+    expect(clientOnly.clientRecordId).toBe('c-fuzzy');
+  });
+
+  it('greedy-on-edge: 同 score は (clientId, dispatchId) 順で決定論的', () => {
+    const r1 = reconcile({
+      dispatches: [
+        baseDispatch('d-A', { task_name: '築地' }),
+        baseDispatch('d-B', { task_name: '築地' }),
+      ],
+      clientRecords: [
+        baseClient('c-1', { task_name: '築地' }),
+        baseClient('c-2', { task_name: '築地' }),
+      ],
+    });
+    // 全 edge が strong=1.0、id 昇順タイブレークで (c-1, d-A) と (c-2, d-B)
+    const matched = r1.rows.filter((row) => row.matchStatus === 'matched');
+    expect(matched).toHaveLength(2);
+    const c1 = matched.find((m) => m.clientRecordId === 'c-1')!;
+    const c2 = matched.find((m) => m.clientRecordId === 'c-2')!;
+    expect(c1.dispatchId).toBe('d-A');
+    expect(c2.dispatchId).toBe('d-B');
+  });
+
   it('client.driver_id が null なら client_only', () => {
     const r = reconcile({
       dispatches: [baseDispatch('d-1')],

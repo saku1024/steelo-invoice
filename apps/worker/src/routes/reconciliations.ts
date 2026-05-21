@@ -7,6 +7,7 @@ import {
   updateReconciliationReview,
   manualMatchReconciliation,
   ActiveReconciliationJobExistsError,
+  ManualMatchValidationError,
   type ReconciliationRow,
   type ReconciliationJobRow,
 } from '@line-crm/db';
@@ -158,11 +159,18 @@ reconciliations.post('/api/reconciliations/:id/manual-match', async (c) => {
       );
     }
     const staff = c.get('staff');
-    await manualMatchReconciliation(c.env.DB, id, {
-      dispatchId,
-      clientRecordId,
-      reviewedBy: staff?.id ?? 'unknown',
-    });
+    try {
+      await manualMatchReconciliation(c.env.DB, id, {
+        dispatchId,
+        clientRecordId,
+        reviewedBy: staff?.id ?? 'unknown',
+      });
+    } catch (e) {
+      if (e instanceof ManualMatchValidationError) {
+        return c.json({ success: false, error: e.message, reason: e.reason }, 400);
+      }
+      throw e;
+    }
     await safeAudit(c.env.DB, c, {
       action: 'dispatch_manual_match',
       resourceType: 'reconciliation',
@@ -202,12 +210,20 @@ reconciliations.post('/api/reconciliations/jobs', async (c) => {
       }
       throw e;
     }
-    // Queues 利用可能なら send、そうでなければ waitUntil で即実行
+    // Codex Phase 2 review HIGH #5 反映:
+    // queue.send 失敗時に job を failed に倒して active_period_key UNIQUE を解放する
     const queue = (c.env as { RECONCILIATION_QUEUE?: Queue }).RECONCILIATION_QUEUE;
-    if (queue) {
-      await queue.send({ jobId: job.id });
-    } else {
-      c.executionCtx.waitUntil(runReconciliationJob(c.env, { jobId: job.id }));
+    try {
+      if (queue) {
+        await queue.send({ jobId: job.id });
+      } else {
+        c.executionCtx.waitUntil(runReconciliationJob(c.env, { jobId: job.id }));
+      }
+    } catch (e) {
+      // enqueue 失敗時は job を failed に
+      const { markReconciliationJobFailed } = await import('@line-crm/db');
+      await markReconciliationJobFailed(c.env.DB, job.id, `enqueue failed: ${String(e)}`);
+      throw e;
     }
     await safeAudit(c.env.DB, c, {
       action: 'reconciliation_run',

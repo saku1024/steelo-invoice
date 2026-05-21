@@ -115,6 +115,25 @@ export async function createDispatchRecord(
   return (await getDispatchRecordById(db, id))!;
 }
 
+/**
+ * raw_message_id に紐付く auto/needs_review 状態の dispatch_records を物理削除する。
+ * LLM parser の冪等性確保用（同 line_message を再解析した時の重複防止）。
+ * 'confirmed' 状態のレコードは保護（人が手で確認した編集を消さない）。
+ */
+export async function deleteDispatchRecordsByRawMessageId(
+  db: D1Database,
+  rawMessageId: string
+): Promise<number> {
+  const r = await db
+    .prepare(
+      `DELETE FROM dispatch_records
+       WHERE raw_message_id = ? AND status IN ('auto', 'needs_review')`
+    )
+    .bind(rawMessageId)
+    .run();
+  return (r.meta as { changes?: number }).changes ?? 0;
+}
+
 export async function updateDispatchRecord(
   db: D1Database,
   id: string,

@@ -27,6 +27,8 @@ export interface LLMParseResponse {
   tokenUsage: {
     input: number;
     output: number;
+    cacheRead: number;
+    cacheWrite: number;
     costUsd: number;
   };
   rawJson: string;
@@ -97,10 +99,16 @@ export async function parseDispatchMessage(
     throw mapAnthropicError(e);
   }
 
-  // usage は input_tokens / output_tokens（cache hit 時は cache_read_input_tokens あり）
+  // Codex Phase 2 review MEDIUM #14 反映:
+  // usage は input_tokens + cache_creation_input_tokens + cache_read_input_tokens を
+  // 合算する。各 token に単価が違うので個別に保持して costUsd 計算でも反映する。
   const usage = resp.usage ?? { input_tokens: 0, output_tokens: 0 };
   const input = usage.input_tokens ?? 0;
   const output = usage.output_tokens ?? 0;
+  const cacheRead =
+    (usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0;
+  const cacheWrite =
+    (usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens ?? 0;
 
   // content[0].text を取り出す（text タイプのみ想定）
   const rawJson = extractText(resp.content);
@@ -126,7 +134,9 @@ export async function parseDispatchMessage(
     tokenUsage: {
       input,
       output,
-      costUsd: estimateCostUsd(input, output),
+      cacheRead,
+      cacheWrite,
+      costUsd: estimateCostUsd(input, output, cacheRead, cacheWrite),
     },
     rawJson,
     promptVersion: bundle.version,

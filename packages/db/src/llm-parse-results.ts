@@ -33,50 +33,36 @@ export interface UpsertLLMParseInput {
 
 /**
  * line_message_id UNIQUE のため UPSERT 動作: 既存があれば UPDATE、attempt_count++。
+ *
+ * Codex Phase 2 review HIGH #6 反映:
+ *   SELECT 後 INSERT の競合を避けるため、SQLite の `INSERT ... ON CONFLICT` に
+ *   一本化する。並行 invocation でも attempt_count は ON CONFLICT 側で +1 される。
  */
 export async function upsertLLMParseResult(
   db: D1Database,
   input: UpsertLLMParseInput
 ): Promise<LLMParseResultRow> {
-  const existing = await db
-    .prepare(`SELECT * FROM llm_parse_results WHERE line_message_id = ?`)
-    .bind(input.lineMessageId)
-    .first<LLMParseResultRow>();
-  const now = jstNow();
-  if (existing) {
-    await db
-      .prepare(
-        `UPDATE llm_parse_results SET
-           model_name = ?, prompt_version = ?, input_json = ?, output_json = ?,
-           status = ?, error_message = ?,
-           token_input = ?, token_output = ?, cost_usd = ?,
-           attempt_count = attempt_count + 1, updated_at = ?
-         WHERE id = ?`
-      )
-      .bind(
-        input.modelName,
-        input.promptVersion,
-        input.inputJson,
-        input.outputJson,
-        input.status,
-        input.errorMessage,
-        input.tokenInput,
-        input.tokenOutput,
-        input.costUsd,
-        now,
-        existing.id
-      )
-      .run();
-    return (await getLLMParseResultByMessage(db, input.lineMessageId))!;
-  }
   const id = crypto.randomUUID();
+  const now = jstNow();
   await db
     .prepare(
       `INSERT INTO llm_parse_results
-       (id, line_message_id, model_name, prompt_version, input_json, output_json,
-        status, error_message, token_input, token_output, cost_usd, attempt_count,
-        created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+         (id, line_message_id, model_name, prompt_version, input_json, output_json,
+          status, error_message, token_input, token_output, cost_usd, attempt_count,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+       ON CONFLICT (line_message_id) DO UPDATE SET
+         model_name = excluded.model_name,
+         prompt_version = excluded.prompt_version,
+         input_json = excluded.input_json,
+         output_json = excluded.output_json,
+         status = excluded.status,
+         error_message = excluded.error_message,
+         token_input = excluded.token_input,
+         token_output = excluded.token_output,
+         cost_usd = excluded.cost_usd,
+         attempt_count = attempt_count + 1,
+         updated_at = excluded.updated_at`
     )
     .bind(
       id,
@@ -127,7 +113,8 @@ export async function getLLMStats(
     vals.push(opts.from);
   }
   if (opts.to) {
-    where.push('created_at <= ?');
+    // Codex Phase 2 review MEDIUM #16: to は exclusive 比較が呼出側の責務
+    where.push('created_at < ?');
     vals.push(opts.to);
   }
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';

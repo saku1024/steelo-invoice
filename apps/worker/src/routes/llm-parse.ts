@@ -65,7 +65,18 @@ llmParse.get('/api/llm-parse/results/:messageId', async (c) => {
 llmParse.get('/api/llm-parse/stats', async (c) => {
   try {
     const from = c.req.query('from') ?? undefined;
-    const to = c.req.query('to') ?? undefined;
+    const toRaw = c.req.query('to') ?? undefined;
+    // Codex Phase 2 review MEDIUM #16 反映:
+    //   UI が `type=date` の YYYY-MM-DD を渡してくるので、`to` は翌日 exclusive
+    //   として `created_at < nextDay` で比較する形に変換する。
+    let to: string | undefined = undefined;
+    if (toRaw && /^\d{4}-\d{2}-\d{2}$/.test(toRaw)) {
+      const d = new Date(toRaw + 'T00:00:00+09:00');
+      d.setDate(d.getDate() + 1);
+      to = d.toISOString().slice(0, 10);
+    } else if (toRaw) {
+      to = toRaw; // 既にタイムスタンプ形式
+    }
     const stats = await getLLMStats(c.env.DB, { from, to });
     return c.json({
       success: true,
