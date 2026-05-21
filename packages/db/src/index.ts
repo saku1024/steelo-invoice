@@ -43,6 +43,7 @@ export * from './reconciliations';
 export * from './anomaly-baselines';
 export * from './notification-settings';
 export * from './notification-deliveries';
+export * from './report-jobs';
 // テスト用 SQLite アダプタは `./test-helpers/sqlite-d1` から直接 import する。
 // ここから re-export すると Worker バンドルに node:fs / better-sqlite3 が混入する
 

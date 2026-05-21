@@ -25,6 +25,12 @@ import {
   createReconciliationJob,
   replaceBaselinesAtomic,
   listAllBaselines,
+  createReportJob,
+  getReportJobById,
+  ActiveReportJobExistsError,
+  ReportSourceMissingError,
+  markReportJobCompleted,
+  recoverStuckReportJobs,
 } from '@line-crm/db';
 import { createSqliteD1, type SqliteD1 } from '@line-crm/db/testing';
 import { runReconciliationJob } from './services/reconciliation-job.js';
@@ -332,6 +338,177 @@ describe('reconciliation-job → 通知 enqueue (CRITICAL #5 境界確認)', () 
       .first<{ n: number }>();
     expect(count!.n).toBe(1);
     void d;
+  });
+});
+
+describe('F10 report_jobs (createJob + source validation + active排他)', () => {
+  it('reconciliation type: source reconciliation_job 無いと ReportSourceMissingError', async () => {
+    await expect(
+      createReportJob(h.db, {
+        period: '2026-05',
+        reportType: 'reconciliation',
+        templateVersion: 1,
+        requestedBy: 's',
+      }),
+    ).rejects.toBeInstanceOf(ReportSourceMissingError);
+  });
+
+  it('reconciliation type: source 解決後に source_reconciliation_job_id がセット', async () => {
+    const job = await createReconciliationJob(h.db, {
+      period: '2026-05',
+      requestedBy: 's',
+    });
+    // ジョブを completed に倒す
+    await h.db
+      .prepare(
+        `UPDATE reconciliation_jobs SET status='completed', completed_at = ?
+         WHERE id = ?`,
+      )
+      .bind(new Date().toISOString(), job.id)
+      .run();
+    const r = await createReportJob(h.db, {
+      period: '2026-05',
+      reportType: 'reconciliation',
+      templateVersion: 1,
+      requestedBy: 's',
+    });
+    expect(r.source_reconciliation_job_id).toBe(job.id);
+    expect(r.status).toBe('queued');
+  });
+
+  it('client_summary type: confirmed import_batch 無いと ReportSourceMissingError', async () => {
+    await expect(
+      createReportJob(h.db, {
+        period: '2026-05',
+        reportType: 'client_summary',
+        templateVersion: 1,
+        requestedBy: 's',
+      }),
+    ).rejects.toBeInstanceOf(ReportSourceMissingError);
+  });
+
+  it('client_summary type: confirmed batch 解決後に source_import_batch_id がセット', async () => {
+    const d = await createDriver(h.db, { name: 'A' });
+    const batchResult = await confirmImportBatch(h.db, {
+      period: '2026-05',
+      fileName: 'a.xlsx',
+      totalRecords: 0,
+      totalFare: 0,
+      totalAdvance: 0,
+      headerVehicleCost: 0,
+      headerProcessingFee: 0,
+      headerPrepayment: 0,
+      commissionRate: 0.075,
+      taxRate: 0.1,
+      templateVersion: null,
+      confirmedBy: 's',
+      rows: [],
+      overwrite: false,
+    });
+    const r = await createReportJob(h.db, {
+      period: '2026-05',
+      reportType: 'client_summary',
+      templateVersion: 1,
+      requestedBy: 's',
+    });
+    expect(r.source_import_batch_id).toBe(batchResult.batchId);
+    void d;
+  });
+
+  it('payment_summary type は Phase 3 未対応で Error', async () => {
+    await expect(
+      createReportJob(h.db, {
+        period: '2026-05',
+        reportType: 'payment_summary',
+        templateVersion: 1,
+        requestedBy: 's',
+      }),
+    ).rejects.toThrow(/not yet supported/);
+  });
+
+  it('同 period × type で active 排他 (active_report_key UNIQUE)', async () => {
+    const reconJob = await createReconciliationJob(h.db, {
+      period: '2026-05',
+      requestedBy: 's',
+    });
+    await h.db
+      .prepare(`UPDATE reconciliation_jobs SET status='completed' WHERE id=?`)
+      .bind(reconJob.id)
+      .run();
+    await createReportJob(h.db, {
+      period: '2026-05',
+      reportType: 'reconciliation',
+      templateVersion: 1,
+      requestedBy: 's',
+    });
+    // 同 period × type は 409
+    await expect(
+      createReportJob(h.db, {
+        period: '2026-05',
+        reportType: 'reconciliation',
+        templateVersion: 1,
+        requestedBy: 's',
+      }),
+    ).rejects.toBeInstanceOf(ActiveReportJobExistsError);
+  });
+
+  it('完了後の同 period × type は新規 job を作れる (active_period_key は queued/running のみ)', async () => {
+    const reconJob = await createReconciliationJob(h.db, {
+      period: '2026-05',
+      requestedBy: 's',
+    });
+    await h.db
+      .prepare(`UPDATE reconciliation_jobs SET status='completed' WHERE id=?`)
+      .bind(reconJob.id)
+      .run();
+    const first = await createReportJob(h.db, {
+      period: '2026-05',
+      reportType: 'reconciliation',
+      templateVersion: 1,
+      requestedBy: 's',
+    });
+    await markReportJobCompleted(h.db, first.id, {
+      r2Key: 'reports/test.pdf',
+      byteSize: 12345,
+      pageCount: 2,
+    });
+    // 2 回目は再生成可能
+    const second = await createReportJob(h.db, {
+      period: '2026-05',
+      reportType: 'reconciliation',
+      templateVersion: 1,
+      requestedBy: 's',
+    });
+    expect(second.id).not.toBe(first.id);
+  });
+
+  it('recoverStuckReportJobs: 30 分以上 running を failed に倒す', async () => {
+    const reconJob = await createReconciliationJob(h.db, {
+      period: '2026-05',
+      requestedBy: 's',
+    });
+    await h.db
+      .prepare(`UPDATE reconciliation_jobs SET status='completed' WHERE id=?`)
+      .bind(reconJob.id)
+      .run();
+    const job = await createReportJob(h.db, {
+      period: '2026-05',
+      reportType: 'reconciliation',
+      templateVersion: 1,
+      requestedBy: 's',
+    });
+    // 1 時間前に start
+    const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+    await h.db
+      .prepare(
+        `UPDATE report_jobs SET status='running', started_at=? WHERE id=?`,
+      )
+      .bind(stale, job.id)
+      .run();
+    const recovered = await recoverStuckReportJobs(h.db, 30);
+    expect(recovered).toBe(1);
+    const after = await getReportJobById(h.db, job.id);
+    expect(after?.status).toBe('failed');
   });
 });
 

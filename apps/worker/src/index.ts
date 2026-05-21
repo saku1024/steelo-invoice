@@ -87,6 +87,7 @@ import llmParseRoute from './routes/llm-parse.js';
 // STEELO Phase 3
 import anomalyBaselinesRoute from './routes/anomaly-baselines.js';
 import notificationSettingsRoute from './routes/notification-settings.js';
+import reportsRoute from './routes/reports.js';
 import { steeloCors, isSteeloPath } from './middleware/steelo-cors.js';
 import { runPaymentJob } from './services/payment-batch-job.js';
 import { handleLLMParseJob } from './services/llm-parser.js';
@@ -231,6 +232,7 @@ app.route('/', llmParseRoute);
 // STEELO Phase 3
 app.route('/', anomalyBaselinesRoute);
 app.route('/', notificationSettingsRoute);
+app.route('/', reportsRoute);
 
 // Self-hosted QR code proxy — prevents leaking ref tokens to third-party services
 app.get('/api/qr', async (c) => {
@@ -1064,6 +1066,35 @@ async function scheduled(
     }
   }
 
+  // `*/5` cron: F10 report_jobs の stuck recovery + fallback consumer
+  if (event.cron === '*/5 * * * *') {
+    try {
+      const { recoverStuckReportJobs, getQueuedReportJobs } = await import(
+        '@line-crm/db'
+      );
+      const recovered = await recoverStuckReportJobs(env.DB, 30);
+      if (recovered > 0) {
+        console.log(`[steelo] recovered ${recovered} stuck report job(s)`);
+      }
+      // REPORT_QUEUE 未バインド時の fallback
+      if (!env.REPORT_QUEUE) {
+        const jobs = await getQueuedReportJobs(env.DB, 3);
+        if (jobs.length > 0) {
+          const { runReportJob } = await import('./services/report-job.js');
+          for (const j of jobs) {
+            try {
+              await runReportJob(env as Env['Bindings'], { jobId: j.id });
+            } catch (e) {
+              console.error(`[steelo] report fallback error for ${j.id}:`, e);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[steelo] phase3 report job recovery/fallback error:', e);
+    }
+  }
+
   // `*/5` cron: LLM 連続失敗 streak 検知 (24h cooldown は isCooldownActive で判定)
   if (event.cron === '*/5 * * * *') {
     try {
@@ -1109,8 +1140,8 @@ async function queue(
       } else if (batch.queue === 'reconciliation-queue') {
         await runReconciliationJob(env, message.body as { jobId: string });
       } else if (batch.queue === 'report-queue') {
-        // Phase 3 F10: PDF report job (実装は F10 タスクで追加予定)
-        console.warn('[steelo] report-queue handler not yet implemented (Phase 3 F10)');
+        const { runReportJob } = await import('./services/report-job.js');
+        await runReportJob(env, message.body as { jobId: string });
       } else {
         console.warn(`[steelo] unknown queue: ${batch.queue}`);
       }
