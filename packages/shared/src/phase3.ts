@@ -63,19 +63,22 @@ export type DeliveryStatus =
   | 'failed'
   | 'skipped';
 
-/** 通知設定 (id=1 単一行) */
+/** LINE 通知の送信先タイプ */
+export type LineTargetKind = 'user' | 'group' | 'room';
+
+/** 通知設定 (id=1 単一行)。LINE Messaging API push_message で送信 */
 export interface NotificationSettings {
   id: 1;
-  /** GET 時はマスク表示。PUT で更新、null で無効化 */
-  slackWebhookUrl: string | null;
-  /** マスク済み表示 (例: hooks.slack.com/services/T-mask/B-mask/mask) */
-  slackWebhookUrlMasked: string | null;
+  /** LINE 送信先 ID: User (U...) / Group (C...) / Room (R...)。null で無効化 */
+  lineTargetId: string | null;
+  /** マスク済み表示 (例: "U1234...abcd") */
+  lineTargetIdMasked: string | null;
+  /** lineTargetId の種別。prefix 検証用 */
+  lineTargetKind: LineTargetKind | null;
   /** 有効化されているイベント。空配列なら通知無効 */
   enabledEvents: NotificationEvent[];
-  /** mention 設定 (Phase 3 では `{}` 固定運用、Phase 4 で拡張) */
-  mentionUsers: Record<string, string>;
   lastTestAt: string | null;
-  /** URL 本体は含めない (HTTP status + path 末尾のみ) */
+  /** LINE API HTTP status + 短い error message (本体 token は含めない) */
   lastError: string | null;
   updatedAt: string;
 }
@@ -140,8 +143,8 @@ export interface ReportJob {
 // -----------------------------------------------------------------------------
 export type Phase3AuditAction =
   | 'anomaly_baseline_recompute'
-  | 'slack_notification_sent'
-  | 'slack_notification_failed'
-  | 'slack_notification_skipped'
+  | 'notification_sent'
+  | 'notification_failed'
+  | 'notification_skipped'
   | 'report_generated'
   | 'notification_settings_updated';

@@ -266,11 +266,11 @@ export type AuditAction =
   | 'reconciliation_review'
   | 'dispatch_manual_match'
   | 'dispatch_status_confirm'
-  // Phase 3 intelligence
+  // Phase 3 intelligence (LINE Messaging API 通知)
   | 'anomaly_baseline_recompute'
-  | 'slack_notification_sent'
-  | 'slack_notification_failed'
-  | 'slack_notification_skipped'
+  | 'notification_sent'
+  | 'notification_failed'
+  | 'notification_skipped'
   | 'report_generated'
   | 'notification_settings_updated';
 

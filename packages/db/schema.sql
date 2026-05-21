@@ -1246,17 +1246,17 @@ CREATE INDEX IF NOT EXISTS idx_anomaly_baselines_driver
 -- ============================================================
 -- notification_settings
 -- ============================================================
--- Phase 3 F9: Slack Webhook 設定 (単一行、id=1 固定)
--- - slack_webhook_url は D1 平文 (Cloudflare D1 EAR + GET 時マスク + audit redact で許容)
--- - GET API はマスク表示、PUT のみで書き換え可、DELETE 非対応
--- - migration で INSERT OR IGNORE で 1 行確保
+-- Phase 3 F9: LINE Messaging API 通知設定 (単一行、id=1 固定)
+-- - LINE_CHANNEL_ACCESS_TOKEN は wrangler secret で別管理 (既存 Phase 1 のものを流用)
+-- - line_target_id は User ID `U***` / Group ID `C***` / Room ID `R***`
+-- - GET API は target_id をマスク表示、PUT のみで書き換え可、DELETE 非対応
 CREATE TABLE IF NOT EXISTS notification_settings (
   id                  INTEGER PRIMARY KEY CHECK (id = 1),
-  slack_webhook_url   TEXT,
-  enabled_events      TEXT NOT NULL DEFAULT '[]',  -- JSON
-  mention_users       TEXT NOT NULL DEFAULT '{}',  -- JSON
+  line_target_id      TEXT,
+  line_target_kind    TEXT,
+  enabled_events      TEXT NOT NULL DEFAULT '[]',
   last_test_at        TEXT,
-  last_error          TEXT,                        -- URL 本体を含めない (status + path 末尾のみ)
+  last_error          TEXT,
   updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
 INSERT OR IGNORE INTO notification_settings (id) VALUES (1);

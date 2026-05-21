@@ -135,69 +135,76 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
 4. The system shall Phase 2 の `reconciliations.warnings` を JSON 配列のまま使い、
    1 行に複数 warning が並ぶケースを許容する。Web UI では severity 別に色分け表示する。
 
-### Requirement 3: Slack 通知の基盤 (F9-1)
+### Requirement 3: LINE 通知の基盤 (F9-1)
 
-**Objective:** 管理者として、Slack Incoming Webhook URL を 1 度だけ登録すれば、
-重要なイベント（月初リマインド / 照合完了 / 異常検出）が自動で投稿される状態にしたい。
+**Objective:** 管理者として、LINE 送信先 (User ID / Group ID / Room ID) を 1 度だけ
+登録すれば、重要なイベント (月初リマインド / 照合完了 / 異常検出 / LLM 連続失敗) が
+LINE Messaging API 経由で自動で push 通知される状態にしたい。Slack 等の追加 SaaS を
+契約せず、Phase 1 で投入済みの `LINE_CHANNEL_ACCESS_TOKEN` を流用する。
 
 #### Acceptance Criteria
 
-1. The system shall `notification_settings` テーブル（単一行想定、`id=1` 固定）で
+1. The system shall `notification_settings` テーブル (単一行想定、`id=1` 固定) で
    以下を管理する:
-   - `slack_webhook_url` (TEXT) — **Codex Phase 3 review MEDIUM #15 反映**:
-     **Phase 3 は D1 平文列で許容** する (Cloudflare D1 は AES-256-GCM の EAR を持つ)。
-     GET 時はマスク表示 (`https://hooks.slack.com/services/T***/B***/***`)、
-     audit_logs / last_error には URL 本体・Slack response body を入れない方針で
-     秘密情報保護とする。アプリ層暗号化は Phase 4 以降で再検討。
-   - `enabled_events` (TEXT, JSON 配列: `['reconciliation_completed',
-     'monthly_reminder', 'llm_parse_failed_streak']`)
-   - `mention_users` (TEXT, JSON: `{anomaly_high: '@channel', default: ''}`)
-     ※単一管理者前提なので Phase 3 では `{}` 固定でも可、Phase 4 で拡張余地
+   - `line_target_id` (TEXT) — 送信先の LINE ID:
+     - User ID (`U` から始まる 33 文字): 管理者の個人 LINE に push
+     - Group ID (`C` から始まる 33 文字): 運用専用グループに push
+     - Room ID (`R` から始まる 33 文字): 複数ユーザーの room に push
+     - null で通知無効化
+   - `line_target_kind` (TEXT) — `'user' | 'group' | 'room'`、prefix 検証用
+   - `enabled_events` (TEXT, JSON 配列): `['reconciliation_completed',
+     'monthly_reminder', 'llm_parse_failed_streak']`
    - `last_test_at`, `last_error`, `updated_at`
+   - **LINE_CHANNEL_ACCESS_TOKEN は wrangler secret で別管理** (Phase 1 のものを流用)
 2. The system shall `/api/notification-settings` (GET / PUT) で管理画面から
-   設定 + テスト投稿を可能にする。設定保存時には Webhook URL に
-   「STEELO 通知設定が更新されました」というテストメッセージを送る。
-   GET は URL をマスク表示し、空文字または `null` でリセット可能。
-   DELETE は対応しない（id=1 は常に存在、内容を空にすることで無効化）。
-3. **Codex round 1 CRITICAL #4 / round 2 補強 反映**: The system shall Slack 投稿
+   設定 + テスト送信を可能にする。設定保存時には対象 LINE 宛に
+   「STEELO 通知設定が更新されました」というテストメッセージを push する。
+   GET は target_id をマスク表示 (`U1234...abcd` のように先頭 5 + 末尾 4 のみ)、
+   空文字または `null` でリセット可能。DELETE は対応しない (id=1 は常に存在、
+   内容を空にすることで無効化)。
+3. **Codex round 1 CRITICAL #4 / round 2 補強 反映**: The system shall LINE 投稿
    失敗時に audit_logs に記録し、management 画面でも「直近の投稿失敗」を表示する。
    - **fetch 自体の timeout は 1 回あたり 5 秒** (`AbortController` で abort)
    - retry は exponential backoff `sleep 1s → fetch 5s → sleep 3s → fetch 5s
      → sleep 8s → fetch 5s` = 最悪累積 **27 秒** で **`waitUntil` 30 秒制限内** に収まる
    - 上記 3 回でも失敗した場合、`notification_deliveries` 行は `status='pending'`
      のまま `attempt_count` を増やして `next_retry_at = now + 5 分` を設定
-   - 次の cron `*/1` で再 claim → 再試行 (Slack 障害復旧後に自動再送)
+   - 次の cron `*/1` で再 claim → 再試行 (LINE 障害復旧後に自動再送)
    - `attempt_count >= 6` で `status='failed'` に倒し、`audit_logs` に
-     `slack_notification_failed` を記録
-4. The system shall Webhook URL を `audit_logs.payload` に直接保存しない
-   （URL 自体が secret 相当）。ログには `slack_webhook_set` のような action のみ記録する。
-   エラーログにも URL を含めず、`last_error` には HTTP status + 末尾の path
-   (`/services/***/***/***`) のみ記録する。
+     `notification_send_failed` を記録
+4. The system shall LINE_CHANNEL_ACCESS_TOKEN や target_id を
+   `audit_logs.payload` に直接保存しない (secret + PII 相当)。ログには
+   `notification_settings_updated` のような action のみ記録する。
+   `last_error` には LINE API HTTP status と短い error message のみ記録
+   (token を含む response body は記録しない)。
 
-### Requirement 4: イベント別 Slack 通知ルール (F9-2)
+### Requirement 4: イベント別 LINE 通知ルール (F9-2)
 
-**Objective:** 管理者として、4 種類のイベント発生時に Slack メッセージが届く状態
-にしたい。各メッセージは Slack Block Kit で見やすく整形されている。
+**Objective:** 管理者として、4 種類のイベント発生時に LINE プッシュ通知が届く状態
+にしたい。メッセージは LINE の text + Flex Message で見やすく整形されている。
 
 #### Acceptance Criteria
 
 1. When 月次照合ジョブが `completed` になった場合、the system shall
+   以下を LINE push する:
    ```
    ✅ 2026-05 月の照合が完了しました
    matched: 87 / client_only: 3 / dispatch_only: 2
-   ⚠️ 異常検出: fare_deviation_high 2 件 / time_inversion 1 件
-   → 詳細: https://admin.example.com/reconciliations?period=2026-05
+   ⚠️ 異常: fare_deviation_high 2 件 / time_inversion 1 件
+   詳細: https://admin.example.com/reconciliations?period=2026-05
    ```
-   を投稿する。
+   text message として送信し、必要に応じて Flex Message で件数のカード表示を併用する。
 2. When 異常検出ロジック (Requirement 1 / 2) で severity=warn の warning が
-   1 件以上発生した場合、the system shall **照合完了通知に集約**して投稿する
-   （別メッセージにはしない、ノイズ対策）。
+   1 件以上発生した場合、the system shall **照合完了通知に集約** して送信する
+   (別メッセージにはしない、ノイズ対策)。
 3. When 毎月 1 日 9:00 JST の cron で前月の confirmed `import_batch` が無い場合、
    the system shall「📋 前月 (2026-04) の元請け Excel がまだ取り込まれていません」
-   というリマインドを投稿する。
+   というリマインドを LINE に push する。
 4. When LLM 解析が直近 24 時間で 5 件連続失敗した場合、the system shall
-   `llm_parse_failed_streak` 通知を投稿する（API key 失効 / Anthropic 障害の早期発見）。
-5. The system shall 各通知に `enabled_events` の対応キーが立っていない場合は送信スキップする。
+   `llm_parse_failed_streak` 通知を LINE に push する
+   (Anthropic API key 失効 / Anthropic 障害の早期発見)。
+5. The system shall 各通知に `enabled_events` の対応キーが立っていない場合は送信
+   スキップする。また `line_target_id` が null の場合も全通知をスキップする。
 6. **Codex Phase 3 review HIGH #13 反映**: The system shall `notification_deliveries`
    テーブルで通知重複を防ぐ:
    - `monthly_reminder`: idempotency key = `monthly_reminder:{YYYY-MM}` (前月分)
@@ -206,6 +213,13 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
    - `reconciliation_completed`: key = `reconciliation_completed:{job_id}` で
      job 1 回につき 1 通知
    - 重複検出時は `audit_logs` に skip 理由を記録
+
+> **設計変更履歴**: 当初 Slack Incoming Webhook で実装する spec だったが、
+> ユーザー判断で LINE Messaging API 直接送信に変更
+> (`LINE_CHANNEL_ACCESS_TOKEN` 流用、新規 SaaS 不要、業務文脈 (ドライバー連絡も LINE)
+> と一致、スマホ即見える)。Codex round 1-4 で Slack について指摘された設計事項
+> (claim 機構 / payload schema バージョニング / waitUntil 制限 / event_payload_json /
+> idempotency / fetch timeout 5s / retry 1s+3s+8s) は LINE 実装でも同様に適用する。
 
 ### Requirement 5: 月次レポート PDF 生成 (F10-1)
 
@@ -328,9 +342,10 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
        - `CREATE UNIQUE INDEX ux_anomaly_baselines_task ON anomaly_baselines (driver_id, task_name) WHERE task_name IS NOT NULL;`
        - `CREATE UNIQUE INDEX ux_anomaly_baselines_driver_all ON anomaly_baselines (driver_id) WHERE task_name IS NULL;`
    - **`notification_settings`** (id INTEGER PRIMARY KEY CHECK (id = 1),
-     slack_webhook_url, enabled_events JSON, mention_users JSON,
-     last_test_at, last_error, updated_at)
+     `line_target_id`, `line_target_kind` ('user' | 'group' | 'room'),
+     enabled_events JSON, last_test_at, last_error, updated_at)
      - 行は migration で `INSERT OR IGNORE` で 1 行投入、DELETE は対応しない
+     - LINE_CHANNEL_ACCESS_TOKEN は wrangler secret (Phase 1 のものを流用)
    - **`notification_deliveries`** (id PK, idempotency_key UNIQUE,
      event_type, status `pending|processing|sent|failed|skipped`, attempt_count,
      claimed_at, claimed_by, **`event_payload_json`** (Slack 構造体ではなく
