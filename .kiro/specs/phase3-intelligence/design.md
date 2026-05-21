@@ -18,7 +18,9 @@
 ### Goals
 
 - 異常検知 false positive ≤ 30%（Phase 2: ~60%）
-- Slack 通知の遅延 ≤ 5 秒（照合完了 → 投稿）
+- **Slack 通知の遅延 ≤ 1 分**（照合完了 → notification_deliveries enqueue → cron `*/1`
+  dispatcher → Slack 投稿。Codex round 3 MEDIUM #2 反映: 即時性が必要なら
+  Phase 4 で notification-queue 化）
 - 200 行規模の PDF レポートを 30 秒以内に生成
 - Phase 1+2 テスト 561 件を 1 件も壊さない
 
@@ -226,7 +228,7 @@ sequenceDiagram
     participant DB as D1
     participant SK as Slack Webhook
 
-    Job->>DB: INSERT notification_deliveries<br/>(idempotency_key=reconciliation_completed:{jobId},<br/> status=pending, payload_json)
+    Job->>DB: INSERT notification_deliveries<br/>(idempotency_key=reconciliation_completed:{jobId},<br/> status=pending, event_payload_json, payload_schema_ver=1)
     Note over Job: job 本体は通知失敗で阻害されない
 
     Cron1->>DB: SELECT confirmed import_batch for last month
@@ -284,18 +286,21 @@ sequenceDiagram
 
     Q->>Job: deliver
     Job->>DB: tryMarkRunning
-    Job->>DB: 必要データ取得 (client_records / reconciliations / payment_summaries)
+    Job->>DB: source ID で必要データ取得<br/>(source_reconciliation_job_id 等で固定)
     Job->>Tmpl: render(data)
     Tmpl->>R2: get('fonts/NotoSansJP-Regular.ttf')
     Tmpl-->>Job: PDFDocument
     Job->>Gen: serialize → Uint8Array
     Job->>R2: put('reports/{period}/{type}_{jobId}.pdf', bytes)
-    Job->>DB: markCompleted
+    Job->>DB: markCompleted (byte_size + page_count + r2_key)
 
-    Web->>API: GET /api/reports/{jobId}/download
-    API->>R2: createPresignedUrl (15min)
-    API-->>Web: { url }
-    Web->>R2: GET (signed URL)
+    Note over Web,R2: Codex round 1 HIGH #14 / round 3 検証反映:<br/>Bearer 必須 proxy download (Phase 1 payment-summary と方式統一)<br/>presigned URL は使わない
+    Web->>API: GET /api/reports/jobs/{jobId}/download<br/>(Authorization: Bearer ...)
+    API->>API: Bearer 検証 + Cloudflare Access
+    API->>DB: SELECT r2_key FROM report_jobs WHERE id=?<br/>(status='completed' 必須)
+    API->>R2: get(r2_key)
+    R2-->>API: bytes
+    API-->>Web: 200 + Content-Disposition + bytes ストリーミング
 ```
 
 ## Components and Interfaces

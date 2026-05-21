@@ -332,9 +332,15 @@ false positive を減らし、本当に確認すべき行だけが highlight さ
      last_test_at, last_error, updated_at)
      - 行は migration で `INSERT OR IGNORE` で 1 行投入、DELETE は対応しない
    - **`notification_deliveries`** (id PK, idempotency_key UNIQUE,
-     event_type, status `pending|sent|failed|skipped`, attempt_count,
-     payload_json (Slack Block Kit), last_error, requested_at, sent_at)
-     - **Codex Phase 3 review HIGH #13 反映**: 通知重複防止 + 再送キュー
+     event_type, status `pending|processing|sent|failed|skipped`, attempt_count,
+     claimed_at, claimed_by, **`event_payload_json`** (Slack 構造体ではなく
+     イベント生データ), **`payload_schema_ver`**, last_error, requested_at,
+     sent_at, next_retry_at)
+     - **Codex round 1 HIGH #13 反映**: 通知重複防止 + 再送キュー
+     - **Codex round 2 HIGH #2 反映**: claim 機構で送信重複防止
+     - **Codex round 2 MEDIUM #7 / round 3 HIGH #1 反映**: payload は Slack
+       Block Kit ではなく event 生データを保存。送信時に `slack-notifier.ts` が
+       `payload_schema_ver` を見て Block Kit を組み立てる (再送互換性確保)
    - **`report_jobs`** (id, period, report_type, status, template_version,
      r2_key, byte_size, page_count, source_import_batch_id NULL,
      source_reconciliation_job_id NULL, source_payment_job_id NULL,

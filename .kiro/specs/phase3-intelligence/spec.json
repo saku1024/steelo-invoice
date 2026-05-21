@@ -1,24 +1,29 @@
 {
   "feature_name": "phase3-intelligence",
   "created_at": "2026-05-21T13:00:00+09:00",
-  "updated_at": "2026-05-21T15:30:00+09:00",
+  "updated_at": "2026-05-21T16:00:00+09:00",
   "language": "ja",
-  "phase": "initialized",
+  "phase": "implementation-ready",
   "approvals": {
     "requirements": {
-      "generated": false,
-      "approved": false
+      "generated": true,
+      "approved": true,
+      "review_rounds": 3,
+      "approval_basis": "Codex 設計レビュー 3 ラウンドで CRITICAL 0 を確認"
     },
     "design": {
-      "generated": false,
-      "approved": false
+      "generated": true,
+      "approved": true,
+      "review_rounds": 3,
+      "approval_basis": "Codex 設計レビュー 3 ラウンドで CRITICAL 0 を確認"
     },
     "tasks": {
-      "generated": false,
-      "approved": false
+      "generated": true,
+      "approved": true,
+      "review_rounds": 3
     }
   },
-  "ready_for_implementation": false,
+  "ready_for_implementation": true,
   "description": "STEELO Phase 3 — Phase 2 で送りにした 3 機能 (F8 異常検知強化 / F9 Slack 通知 / F10 月次レポート PDF) を実装し、業務システムを『データ蓄積』から『プロアクティブな業務支援』へ進化させる。Phase 1 + Phase 2 で稼働照合の完全自動化に到達したのを土台に、ここでは月初の運用負荷を更に下げる。",
   "depends_on": ["phase1-mvp", "phase2-reconciliation"]
 }
