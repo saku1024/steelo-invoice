@@ -1953,6 +1953,157 @@ export const steelo = {
       }>>(`/api/llm-parse/stats${qs.toString() ? '?' + qs : ''}`)
     },
   },
+  // STEELO Phase 3 F8: 異常検知ベースライン
+  anomalyBaselines: {
+    list: () =>
+      fetchApi<ApiResponse<{
+        items: Array<{
+          id: string
+          driverId: string
+          taskName: string | null
+          medianFare: number
+          sdFare: number
+          sampleSize: number
+          baselineScope: 'task' | 'driver_fallback'
+          periodFrom: string
+          periodTo: string
+          computedAt: string
+        }>
+        total: number
+      }>>('/api/anomaly-baselines'),
+    recompute: (period: string) =>
+      fetchApi<ApiResponse<{
+        periodFrom: string
+        periodTo: string
+        taskBaselines: number
+        driverFallbackBaselines: number
+        skippedDrivers: number
+        durationMs: number
+      }>>(`/api/anomaly-baselines/recompute?period=${period}`, {
+        method: 'POST',
+      }),
+  },
+  // STEELO Phase 3 F9: LINE 通知設定
+  notificationSettings: {
+    get: () =>
+      fetchApi<ApiResponse<{
+        settings: {
+          id: 1
+          lineTargetId: string | null
+          lineTargetIdMasked: string | null
+          lineTargetKind: 'user' | 'group' | 'room' | null
+          enabledEvents: string[]
+          lastTestAt: string | null
+          lastError: string | null
+          updatedAt: string
+        }
+        recentDeliveries: Array<{
+          id: string
+          eventType: string
+          status: string
+          attemptCount: number
+          requestedAt: string
+          sentAt: string | null
+          lastError: string | null
+        }>
+      }>>('/api/notification-settings'),
+    update: (body: { lineTargetId?: string | null; enabledEvents?: string[] }) =>
+      fetchApi<ApiResponse<{
+        lineTargetIdMasked: string | null
+        lineTargetKind: string | null
+        enabledEvents: string[]
+      }>>('/api/notification-settings', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+    sendTest: () =>
+      fetchApi<ApiResponse<{
+        deliveryId: string
+        note: string
+      }>>('/api/notification-settings/test', {
+        method: 'POST',
+      }),
+  },
+  // STEELO Phase 3 F10: 月次 PDF レポート
+  reports: {
+    enqueueJob: (body: {
+      period: string
+      reportType: 'reconciliation' | 'client_summary' | 'payment_summary'
+    }) =>
+      fetchApi<ApiResponse<{ jobId: string; statusUrl: string }>>(
+        '/api/reports/jobs',
+        { method: 'POST', body: JSON.stringify(body) },
+      ),
+    getJob: (id: string) =>
+      fetchApi<ApiResponse<{
+        id: string
+        period: string
+        reportType: string
+        status: 'queued' | 'running' | 'completed' | 'failed'
+        templateVersion: number
+        byteSize: number | null
+        pageCount: number | null
+        sourceImportBatchId: string | null
+        sourceReconciliationJobId: string | null
+        errorMessage: string | null
+        requestedBy: string
+        requestedAt: string
+        startedAt: string | null
+        completedAt: string | null
+        downloadUrl: string | null
+      }>>(`/api/reports/jobs/${id}`),
+    list: (params: { period?: string; status?: string } = {}) => {
+      const qs = new URLSearchParams()
+      if (params.period) qs.set('period', params.period)
+      if (params.status) qs.set('status', params.status)
+      return fetchApi<ApiResponse<{
+        items: Array<{
+          id: string
+          period: string
+          reportType: string
+          status: string
+          byteSize: number | null
+          pageCount: number | null
+          requestedAt: string
+          completedAt: string | null
+        }>
+        total: number
+      }>>(`/api/reports/jobs${qs.toString() ? '?' + qs : ''}`)
+    },
+    /** Bearer 付き fetch で R2 から PDF を取得し Blob URL を返す */
+    download: async (jobId: string): Promise<{ blobUrl: string; filename: string }> => {
+      const apiKey =
+        typeof window !== 'undefined' ? localStorage.getItem('apiKey') : null
+      const resp = await fetch(
+        `${API_URL}/api/reports/jobs/${jobId}/download`,
+        { headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {} },
+      )
+      if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
+      const blob = await resp.blob()
+      const cd = resp.headers.get('content-disposition') ?? ''
+      const m = cd.match(/filename\*=UTF-8''([^;]+)/)
+      const filename = m ? decodeURIComponent(m[1]) : `report-${jobId}.pdf`
+      return { blobUrl: URL.createObjectURL(blob), filename }
+    },
+    /** ジョブを完了 / 失敗まで poll */
+    pollJob: async (
+      jobId: string,
+      opts: { intervalMs?: number; timeoutMs?: number } = {},
+    ) => {
+      const interval = opts.intervalMs ?? 3000
+      const timeout = opts.timeoutMs ?? 5 * 60_000
+      const start = Date.now()
+      while (Date.now() - start < timeout) {
+        const r = await steelo.reports.getJob(jobId)
+        if (!r.success) throw new Error('job lookup failed')
+        if (r.data.status === 'completed' || r.data.status === 'failed') {
+          return r.data
+        }
+        await new Promise((resolve) => setTimeout(resolve, interval))
+      }
+      throw new Error('report job polling timed out')
+    },
+  },
 }
 
 export type PreviewResponse = {

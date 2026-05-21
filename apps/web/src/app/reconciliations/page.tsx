@@ -213,8 +213,8 @@ export default function ReconciliationsPage() {
                 <td className="px-3 py-2 text-xs text-gray-600">
                   {r.clientRecordId ? r.clientRecordId.slice(0, 8) + '…' : '—'}
                 </td>
-                <td className="px-3 py-2 text-xs text-orange-700">
-                  {r.warnings.length > 0 ? r.warnings.join(', ').slice(0, 80) : '—'}
+                <td className="px-3 py-2">
+                  <WarningsCell warnings={r.warnings} />
                 </td>
                 <td className="px-3 py-2 text-center">
                   {r.reviewed ? (
@@ -375,6 +375,32 @@ function MatchBadge({ status }: { status: MatchStatus }) {
     <span className={`inline-block rounded px-2 py-0.5 text-xs ${colors[status]}`}>
       {labels[status]}
     </span>
+  )
+}
+
+// F8 Task 2.6: warnings の severity 別色分け + type バッジ表示
+function WarningsCell({
+  warnings,
+}: {
+  warnings: Reconciliation['warnings']
+}) {
+  if (warnings.length === 0) return <span className="text-xs text-gray-400">—</span>
+  return (
+    <div className="flex flex-wrap gap-1">
+      {warnings.map((w, idx) => (
+        <span
+          key={idx}
+          className={`inline-block rounded px-1.5 py-0.5 font-mono text-xs ${
+            w.severity === 'warn'
+              ? 'bg-orange-100 text-orange-800'
+              : 'bg-yellow-50 text-yellow-700'
+          }`}
+          title={w.message}
+        >
+          {w.type}
+        </span>
+      ))}
+    </div>
   )
 }
 
