@@ -34,6 +34,7 @@ export default function ReconciliationsPage() {
   const [job, setJob] = useState<ReconciliationJob | null>(null)
   const [jobRunning, setJobRunning] = useState(false)
   const [offset, setOffset] = useState(0)
+  const [manualMatchTarget, setManualMatchTarget] = useState<Reconciliation | null>(null)
   const LIMIT = 100
 
   const load = async () => {
@@ -223,6 +224,14 @@ export default function ReconciliationsPage() {
                   )}
                 </td>
                 <td className="px-3 py-2 text-right">
+                  {r.matchStatus !== 'matched' && (
+                    <button
+                      onClick={() => setManualMatchTarget(r)}
+                      className="mr-2 rounded border bg-blue-50 px-2 py-1 text-xs text-blue-700 hover:bg-blue-100"
+                    >
+                      手動マッチ
+                    </button>
+                  )}
                   <button
                     onClick={() => review(r.id, !r.reviewed)}
                     className="rounded border px-2 py-1 text-xs hover:bg-gray-50"
@@ -261,6 +270,91 @@ export default function ReconciliationsPage() {
         >
           次へ →
         </button>
+      </div>
+
+      {manualMatchTarget && (
+        <ManualMatchModal
+          recon={manualMatchTarget}
+          onCancel={() => setManualMatchTarget(null)}
+          onSaved={async () => {
+            setManualMatchTarget(null)
+            await load()
+          }}
+          onError={(e) => setError(e)}
+        />
+      )}
+    </div>
+  )
+}
+
+function ManualMatchModal({
+  recon,
+  onCancel,
+  onSaved,
+  onError,
+}: {
+  recon: Reconciliation
+  onCancel: () => void
+  onSaved: () => void | Promise<void>
+  onError: (e: string) => void
+}) {
+  // dispatch_only なら client_record の候補を探す（同 period 内）
+  // client_only なら dispatch_records の候補を探す（同 period 内、未マッチ）
+  // 簡易版: 同 period の全候補から手動選択
+  const [candidateId, setCandidateId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const targetKind = recon.matchStatus === 'dispatch_only' ? 'client' : 'dispatch'
+
+  const save = async () => {
+    if (!candidateId.trim()) {
+      onError('候補 ID を入力してください')
+      return
+    }
+    setSaving(true)
+    try {
+      await steelo.reconciliations.manualMatch(recon.id, {
+        dispatchId: targetKind === 'dispatch' ? candidateId.trim() : undefined,
+        clientRecordId: targetKind === 'client' ? candidateId.trim() : undefined,
+      })
+      await onSaved()
+    } catch (e) {
+      onError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="w-full max-w-md rounded bg-white p-6 shadow-lg">
+        <h2 className="mb-2 text-lg font-semibold">手動マッチング</h2>
+        <p className="mb-3 text-sm text-gray-700">
+          {recon.matchStatus === 'dispatch_only'
+            ? 'この dispatch_record に紐付ける client_record の ID を入力してください'
+            : 'この client_record に紐付ける dispatch_record の ID を入力してください'}
+        </p>
+        <p className="mb-2 text-xs text-gray-500">
+          現在: {recon.matchStatus} / score {recon.matchScore.toFixed(2)}
+        </p>
+        <input
+          type="text"
+          className="mb-4 w-full rounded border px-2 py-1 font-mono text-sm"
+          placeholder={`${targetKind}_record の UUID`}
+          value={candidateId}
+          onChange={(e) => setCandidateId(e.target.value)}
+        />
+        <div className="flex justify-end gap-2">
+          <button onClick={onCancel} className="rounded border px-4 py-2">
+            キャンセル
+          </button>
+          <button
+            onClick={save}
+            disabled={saving || !candidateId.trim()}
+            className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:bg-gray-300"
+          >
+            {saving ? 'マッチング中…' : 'マッチ作成'}
+          </button>
+        </div>
       </div>
     </div>
   )
