@@ -1,0 +1,17 @@
+# wrangler dev で読まれるローカル secret。
+# `cp .dev.vars.example .dev.vars` してから値を埋める。実体は .gitignore 対象。
+
+# 既存 LINE Harness 用
+API_KEY=test-api-key-12345
+LINE_CHANNEL_ACCESS_TOKEN=dummy
+LINE_CHANNEL_SECRET=dummy
+LIFF_URL=https://liff.line.me/dummy
+LINE_CHANNEL_ID=dummy
+LINE_LOGIN_CHANNEL_ID=dummy
+LINE_LOGIN_CHANNEL_SECRET=dummy
+WORKER_URL=http://localhost:8787
+
+# STEELO Phase 1 用
+# 管理画面と STEELO API の許可 origin（カンマ区切り）。
+# Cloudflare Access 配下にあることを前提に、多層防御として origin も限定する。
+STEELO_WEB_ORIGINS=https://admin.example.com

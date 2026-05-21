@@ -18,3 +18,6 @@ apps/worker/dist/
 
 # wrangler types で生成される（コミット対象外）
 apps/worker/worker-configuration.d.ts
+
+# wrangler local secrets
+apps/worker/.dev.vars
