@@ -1,5 +1,11 @@
 # Implementation Plan — Phase 3 Intelligence
 
+> **⚠️ F9 通知チャネル変更履歴**
+>
+> 本ドキュメント中の `Slack` 言及は、ユーザー判断で **LINE Messaging API** に切替済み。
+> 詳細な読み替え表は [`design.md`](./design.md) 冒頭を参照。実装は
+> `apps/worker/src/services/line-notifier.ts` 系で完了済み。
+
 `requirements.md`（8 要件）と `design.md` に基づく実装タスク。
 Foundation → F8 → F9 → F10 → Validation の順、`(P)` で並列実行可能を示す。
 

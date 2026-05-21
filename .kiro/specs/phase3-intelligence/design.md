@@ -1,5 +1,25 @@
 # Design Document — Phase 3 Intelligence
 
+> **⚠️ 設計変更履歴 (重要)**
+>
+> F9 通知チャネルは当初 Slack Incoming Webhook で設計されていましたが、ユーザー判断で
+> **LINE Messaging API push_message 直接送信** に切り替えました。
+> 切替の意思決定とコミット履歴: commit `4b79239` 参照。
+>
+> 本ドキュメント中の `Slack` / `slack-*` / `SLACK_*` の記述は **読み替え対象** です:
+>
+> | 旧 (Slack) | 新 (LINE) |
+> |---|---|
+> | `slack_webhook_url` | `line_target_id` (DB column) |
+> | `SLACK_WEBHOOK_URL` (env) | `LINE_CHANNEL_ACCESS_TOKEN` (Phase 1 既存を流用) |
+> | `slack-notifier.ts` | `line-notifier.ts` |
+> | `slack-dispatcher` (cron `*/1`) | `notification-dispatcher` (cron `*/1`) |
+> | Slack Block Kit | LINE Flex Message / text |
+> | `slack_notification_sent/failed/skipped` audit | `notification_sent/failed/skipped` |
+>
+> 真の現行仕様は `requirements.md` Requirement 3-4 と実装コード
+> (apps/worker/src/services/line-notifier.ts 等) を参照してください。
+
 ## Overview
 
 **Purpose**: Phase 2 で完成した自動照合パイプラインの上に、(1) 異常検知の精度向上、

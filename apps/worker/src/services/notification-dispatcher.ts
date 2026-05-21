@@ -149,7 +149,15 @@ export async function runNotificationDispatcher(
 
       if (sendResult.sent) {
         await markSent(env.DB, row.id);
-        await recordTestResult(env.DB).catch(() => undefined);
+        // Codex full review MEDIUM #7 反映: last_test_at は isTest payload の場合のみ更新
+        try {
+          const payload = JSON.parse(row.event_payload_json) as { isTest?: boolean };
+          if (payload?.isTest) {
+            await recordTestResult(env.DB);
+          }
+        } catch {
+          // payload parse 失敗は無視
+        }
         await recordSystemAudit(env.DB, {
           action: 'notification_sent',
           resourceType: 'notification_delivery',

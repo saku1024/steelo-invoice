@@ -113,7 +113,8 @@ Phase 1 (支払明細半自動化) + Phase 2 (LLM 解析 + 自動照合) + Phase
 
 ## 3. D1 マイグレーション適用
 
-順番に実行。**046 → 047** の順を厳守。
+**Phase 1 + 2 + 3 を全部一気に投入する場合は `046 → 047 → 048` の順を厳守**。
+既存環境への追加デプロイ時は適用済みのものを skip し、未適用 migration を順番に。
 
 - [ ] Phase 1 schema を本番 D1 に適用
   ```sh
@@ -127,15 +128,23 @@ Phase 1 (支払明細半自動化) + Phase 2 (LLM 解析 + 自動照合) + Phase
     --file=packages/db/migrations/047_phase2_reconciliation.sql
   ```
 
+- [ ] Phase 3 schema を追加適用 (Phase 3 同時投入 or 追加デプロイ時)
+  ```sh
+  wrangler d1 execute line-crm --env production --remote \
+    --file=packages/db/migrations/048_phase3_intelligence.sql
+  ```
+
 - [ ] テーブルが揃っているか確認
   ```sh
   wrangler d1 execute line-crm --env production --remote \
     --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
   ```
-  → 想定: `audit_logs` / `client_records` / `dispatch_records` / `driver_aliases` /
-  `driver_deductions` / `drivers` / `import_batches` / `line_messages` /
-  `llm_parse_results` / `payment_jobs` / `payment_summaries` /
-  `reconciliation_jobs` / `reconciliations` 等。
+  → 想定 (Phase 1+2+3 全部): `anomaly_baselines` / `audit_logs` / `client_records` /
+  `dispatch_records` / `driver_aliases` / `driver_deductions` / `drivers` /
+  `import_batches` / `line_messages` / `llm_parse_results` /
+  `notification_deliveries` / `notification_settings` /
+  `payment_jobs` / `payment_summaries` / `reconciliation_jobs` / `reconciliations` /
+  `report_jobs` 等
 
 ---
 
@@ -438,13 +447,15 @@ crons = ["*/5 * * * *", "0 */6 * * *", "*/1 * * * *", "0 0 1 * *"]
 
 ## 9. デプロイ完了の判定基準
 
-以下がすべて満たされたら「Phase 1 + Phase 2 本番投入完了」と判定する:
+以下がすべて満たされたら「Phase 1 + Phase 2 + Phase 3 本番投入完了」と判定する:
 
 - [ ] §6.1〜6.3 のスモークテストが全件 PASS
-- [ ] §6.4 の acceptance checklist が全件 PASS
+- [ ] §6.4 の acceptance checklist (phase1/2/3) が全件 PASS
+- [ ] §8.5 Phase 3 追加手順の各項目が完了 (D1 048 / R2 フォント / cron 4 / Access / LINE 設定)
 - [ ] 24 時間運用しても §8.3 の症状リストにあるエラーが発生しない
 - [ ] 翌月の月初照合で 3 分類が想定どおりに分かれる
 - [ ] LLM コストが想定範囲内 (¥240〜500 / 月)
+- [ ] LINE 通知が月初 / 照合完了 で正しく届く (LINE Messaging API 無料枠 200 通/月内)
 
 ---
 

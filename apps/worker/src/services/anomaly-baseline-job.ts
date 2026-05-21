@@ -77,15 +77,18 @@ export async function runAnomalyBaselineJob(
   const seenDriversWithEnoughTaskCoverage = new Set<string>();
 
   // (a) task baseline: count >= TASK_MIN_SAMPLES
+  // Codex full review HIGH #1 反映:
+  //   task_name が NULL のデータは task baseline として作らない
+  //   (driver_fallback と partial unique index 上で衝突するため)
   for (const [taskKey, fares] of taskGroup) {
     if (fares.length < TASK_MIN_SAMPLES) continue;
     const idx = taskKey.indexOf('|');
     const driverId = taskKey.slice(0, idx);
     const taskNameRaw = taskKey.slice(idx + 1);
-    const taskName = taskNameRaw === '__NULL__' ? null : taskNameRaw;
+    if (taskNameRaw === '__NULL__') continue; // NULL task は driver_fallback 側に集約
     baselines.push({
       driverId,
-      taskName,
+      taskName: taskNameRaw,
       medianFare: median(fares),
       sdFare: standardDeviation(fares),
       sampleSize: fares.length,

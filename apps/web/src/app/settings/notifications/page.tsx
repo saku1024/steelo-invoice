@@ -192,18 +192,46 @@ export default function NotificationSettingsPage() {
             >
               {saving ? '保存中…' : '保存'}
             </button>
+            {/* Codex full review HIGH #8 反映:
+                  API は安全のため lineTargetId 本体を返さないため、
+                  lineTargetIdMasked で「設定済みかどうか」を判定する。 */}
             <button
               onClick={sendTest}
-              disabled={testing || !settings.settings.lineTargetId}
+              disabled={testing || !settings.settings.lineTargetIdMasked}
               className="rounded border border-blue-600 px-4 py-2 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
               title={
-                !settings.settings.lineTargetId
+                !settings.settings.lineTargetIdMasked
                   ? '先に LINE ID を保存してください'
                   : ''
               }
             >
               {testing ? '送信中…' : 'テスト送信'}
             </button>
+            {/* Codex full review HIGH #8 反映: 明示的な無効化ボタン */}
+            {settings.settings.lineTargetIdMasked && (
+              <button
+                onClick={async () => {
+                  if (!confirm('LINE 通知を無効化しますか？(target_id をクリア)')) return
+                  setSaving(true)
+                  try {
+                    await steelo.notificationSettings.update({
+                      lineTargetId: null,
+                      enabledEvents: draftEvents,
+                    })
+                    setInfo('LINE 通知を無効化しました')
+                    await load()
+                  } catch (e) {
+                    setError(String(e))
+                  } finally {
+                    setSaving(false)
+                  }
+                }}
+                disabled={saving}
+                className="rounded border border-red-300 px-4 py-2 text-red-700 hover:bg-red-50 disabled:opacity-50"
+              >
+                通知無効化
+              </button>
+            )}
           </div>
 
           {settings.settings.lastError && (

@@ -125,7 +125,7 @@ export async function runReconciliationJob(
         }
       }
       const adminUrl = `${env.STEELO_WEB_ORIGINS?.split(',')[0]?.trim() ?? ''}/reconciliations?period=${job.period}`;
-      await enqueueDelivery(env.DB, {
+      const enq = await enqueueDelivery(env.DB, {
         idempotencyKey: `reconciliation_completed:${jobId}`,
         eventType: 'reconciliation_completed',
         eventPayloadJson: JSON.stringify({
@@ -137,6 +137,18 @@ export async function runReconciliationJob(
           adminUrl,
         }),
       });
+      // Codex full review MEDIUM #8 反映: 重複 skip も audit に記録
+      if (!enq.inserted) {
+        await recordSystemAudit(env.DB, {
+          action: 'notification_skipped',
+          resourceType: 'reconciliation_job',
+          resourceId: jobId,
+          payload: {
+            event_type: 'reconciliation_completed',
+            reason: 'duplicate_enqueue (idempotency_key UNIQUE)',
+          },
+        });
+      }
     } catch (e) {
       // 通知 enqueue 失敗は job 本体の成功を阻害しない (fire-and-forget)
       console.error('[reconciliation-job] notification enqueue failed:', e);

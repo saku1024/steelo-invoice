@@ -2070,13 +2070,12 @@ export const steelo = {
         total: number
       }>>(`/api/reports/jobs${qs.toString() ? '?' + qs : ''}`)
     },
-    /** Bearer 付き fetch で R2 から PDF を取得し Blob URL を返す */
+    /** Bearer 付き fetch で R2 から PDF を取得し Blob URL を返す
+     *  Codex full review HIGH #3 反映: getApiKey() を再利用 (localStorage key 名統一) */
     download: async (jobId: string): Promise<{ blobUrl: string; filename: string }> => {
-      const apiKey =
-        typeof window !== 'undefined' ? localStorage.getItem('apiKey') : null
       const resp = await fetch(
         `${API_URL}/api/reports/jobs/${jobId}/download`,
-        { headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {} },
+        { headers: { Authorization: `Bearer ${getApiKey()}` } },
       )
       if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
       const blob = await resp.blob()

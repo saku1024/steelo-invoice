@@ -30,10 +30,19 @@ export interface BaselineInput {
 }
 
 /**
- * 対象 period の baseline を全置換する (Codex round 2 HIGH #4):
- *   1. period_from / period_to が一致する行を DELETE
+ * baseline を全置換する (Codex full review CRITICAL #1 反映):
+ *   1. **全行 DELETE** (世代は常に 1 つだけ保持、現行運用に合わせ「常に最新」設計)
  *   2. 新 baseline を INSERT
  * 両操作を D1 batch 内で原子的に実行。
+ *
+ * 設計判断:
+ *   partial unique index `(driver_id, task_name)` / `(driver_id) WHERE task_name IS NULL`
+ *   は period を含まないため、複数世代の保持はそもそも UNIQUE 違反になる。
+ *   よって「常に現行 1 世代」設計に固定する。periodFrom / periodTo は情報列として
+ *   保持するのみ。
+ *
+ *   過去 baseline を保持したい場合は別 history テーブルに archive する設計を
+ *   Phase 4 で検討する。
  */
 export async function replaceBaselinesAtomic(
   db: D1Database,
@@ -43,24 +52,16 @@ export async function replaceBaselinesAtomic(
     rows: BaselineInput[];
   },
 ): Promise<{ deleted: number; inserted: number }> {
-  // 削除対象件数を先に取得 (情報用、batch には DELETE のみ含める)
+  // 全 baseline 件数を取得 (情報用)
   const before = await db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM anomaly_baselines
-       WHERE period_from = ? AND period_to = ?`,
-    )
-    .bind(input.periodFrom, input.periodTo)
+    .prepare(`SELECT COUNT(*) AS n FROM anomaly_baselines`)
     .first<{ n: number }>();
   const deleteCount = before?.n ?? 0;
 
   const now = jstNow();
   const stmts: D1PreparedStatement[] = [
-    db
-      .prepare(
-        `DELETE FROM anomaly_baselines
-         WHERE period_from = ? AND period_to = ?`,
-      )
-      .bind(input.periodFrom, input.periodTo),
+    // 全 baseline を DELETE してから INSERT (常に現行 1 世代)
+    db.prepare(`DELETE FROM anomaly_baselines`),
     ...input.rows.map((r) =>
       db
         .prepare(

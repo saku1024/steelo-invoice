@@ -134,7 +134,7 @@ Phase 3 (F8 異常検知強化 + F9 LINE 通知 + F10 月次 PDF レポート) �
 
 ### 2.5 手動テスト送信
 
-- [ ] `POST /api/notification-settings/test` → 202 + deliveryId
+- [ ] `POST /api/notification-settings/test` → 200 + deliveryId
 - [ ] 1 分後に LINE 宛にテスト通知が届く
 
 ---
@@ -205,8 +205,11 @@ Phase 3 (F8 異常検知強化 + F9 LINE 通知 + F10 月次 PDF レポート) �
 
 ### 4.2 障害復旧シナリオ
 
-- [ ] LINE_CHANNEL_ACCESS_TOKEN を失効させる → 投稿失敗 → `notification_deliveries.status='pending'`
-      で next_retry_at +5 分。Token 復活後の cron で自動再送
+- [ ] LINE_CHANNEL_ACCESS_TOKEN を失効させる:
+      - 401 (auth) は **4xx 即 failed** (retry なし、token 復活で自動再送されない)。
+        手動で `notification_deliveries.status='pending'` に戻す必要あり。
+      - 500 / 503 / timeout 等は **5xx/timeout = retryable** で
+        `next_retry_at +5 分` セット → token 復活後の cron で自動再送
 - [ ] R2 bucket のフォントを削除 → report job 生成失敗 (FONT_NOT_FOUND)。
       フォント再アップロード後の再投入で成功
 - [ ] Anthropic API key 失効 → LLM 解析失敗 → 5 件累積で LINE に

@@ -116,9 +116,10 @@ export async function renderReconciliationReport(
     }
   }
 
-  drawFooter(summaryPage, fonts, 1, 1 /* placeholder, updated below */);
+  // (footer ページ番号は全ページ生成後に一括描画、Codex full review MEDIUM #3 反映)
 
   // ページ 2 以降: 各 status の行一覧 (最大 25 行 / ページ)
+  // Codex full review HIGH #5 反映: warning カラムを表示 (severity 別)
   const detailPages = paginateRows(data.rows);
   for (const pageRows of detailPages) {
     const page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
@@ -131,7 +132,6 @@ export async function renderReconciliationReport(
       font: fonts.bold,
     });
     py -= LINE_HEIGHT * 1.5;
-    // テーブルヘッダー
     drawDetailRow(
       page,
       fonts.bold,
@@ -142,9 +142,11 @@ export async function renderReconciliationReport(
       'driver',
       'date',
       'task',
+      'warn',
     );
     py -= LINE_HEIGHT;
     for (const row of pageRows) {
+      const warnSummary = summarizeWarnings(row.warnings);
       drawDetailRow(
         page,
         fonts.regular,
@@ -155,18 +157,61 @@ export async function renderReconciliationReport(
         row.driverName ?? '-',
         row.workDate ?? '-',
         row.clientTaskName ?? row.dispatchTaskName ?? '-',
+        warnSummary,
       );
       py -= LINE_HEIGHT;
     }
   }
 
-  // フッターのページ番号を再描画
+  // ページ末尾: warning がある行だけ抽出した一覧 (Codex full review HIGH #5)
+  const warnedRows = data.rows.filter((r) => r.warnings.length > 0);
+  if (warnedRows.length > 0) {
+    const wPages = paginateRows(warnedRows);
+    for (const pageRows of wPages) {
+      const page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      drawHeader(page, data, fonts);
+      let py = PAGE_HEIGHT - PAGE_MARGIN - 50;
+      page.drawText('警告 warning 一覧', {
+        x: PAGE_MARGIN,
+        y: py,
+        size: FONT_SIZE_SECTION,
+        font: fonts.bold,
+      });
+      py -= LINE_HEIGHT * 1.5;
+      for (const row of pageRows) {
+        for (const w of row.warnings) {
+          const sev = w.severity === 'warn' ? '⚠️' : 'ℹ️';
+          const line = `${sev} [${w.type}] ${row.driverName ?? '-'} / ${row.workDate ?? '-'} / ${row.clientTaskName ?? row.dispatchTaskName ?? '-'}: ${w.message}`;
+          page.drawText(truncate(line, 130), {
+            x: PAGE_MARGIN,
+            y: py,
+            size: FONT_SIZE_SMALL,
+            font: fonts.regular,
+          });
+          py -= LINE_HEIGHT;
+          if (py < PAGE_MARGIN + 30) break;
+        }
+        if (py < PAGE_MARGIN + 30) break;
+      }
+    }
+  }
+
+  // フッターのページ番号を全ページに描画 (summary page の placeholder は廃止)
+  // Codex full review MEDIUM #3 反映: footer の二重描画を避ける
   const allPages = pdf.getPages();
   for (let i = 0; i < allPages.length; i++) {
     drawFooter(allPages[i], fonts, i + 1, allPages.length);
   }
 
   return { pageCount: allPages.length };
+}
+
+function summarizeWarnings(warnings: ReconciliationRowForReport['warnings']): string {
+  if (warnings.length === 0) return '';
+  // 最も重い severity を 1 つだけ表示 (列幅節約)
+  const warn = warnings.find((w) => w.severity === 'warn');
+  if (warn) return `⚠️${warn.type}`;
+  return `ℹ️${warnings[0].type}`;
 }
 
 function drawHeader(
@@ -218,14 +263,16 @@ function drawDetailRow(
   driver: string,
   date: string,
   task: string,
+  warn = '',
 ): void {
   const cols = [
     { x: PAGE_MARGIN, text: status, w: 70 },
     { x: PAGE_MARGIN + 80, text: method, w: 50 },
     { x: PAGE_MARGIN + 135, text: score, w: 40 },
-    { x: PAGE_MARGIN + 180, text: driver, w: 80 },
-    { x: PAGE_MARGIN + 270, text: date, w: 80 },
-    { x: PAGE_MARGIN + 360, text: task, w: 150 },
+    { x: PAGE_MARGIN + 180, text: driver, w: 70 },
+    { x: PAGE_MARGIN + 260, text: date, w: 70 },
+    { x: PAGE_MARGIN + 340, text: task, w: 90 },
+    { x: PAGE_MARGIN + 440, text: warn, w: 80 },
   ];
   for (const c of cols) {
     page.drawText(truncate(c.text, c.w / 6), {

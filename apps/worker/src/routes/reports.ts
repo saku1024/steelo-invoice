@@ -29,8 +29,14 @@ const route = new Hono<Env>();
  * Response: 202 + { jobId } / 409 active 重複 / 422 source 不在 / 400 bad input
  */
 route.post('/api/reports/jobs', async (c) => {
+  // Codex full review MEDIUM #10 反映: JSON parse 失敗は 400
+  let body: Record<string, unknown>;
   try {
-    const body = (await c.req.json()) as Record<string, unknown>;
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch (e) {
+    return c.json({ success: false, error: `invalid JSON body: ${String(e)}` }, 400);
+  }
+  try {
     const period = asPeriodStr(body.period);
     if (!period) {
       return c.json({ success: false, error: 'period (YYYY-MM) required' }, 400);
@@ -40,6 +46,16 @@ route.post('/api/reports/jobs', async (c) => {
       return c.json(
         { success: false, error: `reportType must be one of ${ALLOWED_TYPES.join(', ')}` },
         400,
+      );
+    }
+    // Codex full review MEDIUM #9 反映: Phase 3 で実装着手しない type は 422 で明示
+    if (reportType === 'payment_summary') {
+      return c.json(
+        {
+          success: false,
+          error: 'payment_summary report type is not yet supported (Phase 4 で再評価)',
+        },
+        422,
       );
     }
 

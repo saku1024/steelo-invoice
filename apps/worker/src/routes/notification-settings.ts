@@ -107,7 +107,8 @@ route.put('/api/notification-settings', async (c) => {
         ? body.lineTargetId.trim()
         : undefined;
 
-    // バリデーション: prefix が U/C/R 以外なら 400
+    // バリデーション: prefix が U/C/R + 33 文字 (LINE User/Group/Room ID 仕様) でなければ 400
+    // Codex full review MEDIUM #4 反映: 仕様に合わせて長さも厳密チェック
     if (lineTargetId !== undefined && lineTargetId !== null) {
       const kind = inferTargetKind(lineTargetId);
       if (!kind) {
@@ -119,9 +120,22 @@ route.put('/api/notification-settings', async (c) => {
           400,
         );
       }
-      if (lineTargetId.length < 9) {
+      // LINE User/Group/Room ID は prefix 1 文字 + hex 32 文字 = 計 33 文字
+      if (lineTargetId.length !== 33) {
         return c.json(
-          { success: false, error: 'lineTargetId is too short' },
+          {
+            success: false,
+            error: `lineTargetId must be 33 characters (prefix + 32 hex), got ${lineTargetId.length}`,
+          },
+          400,
+        );
+      }
+      if (!/^[UCR][0-9a-f]{32}$/.test(lineTargetId)) {
+        return c.json(
+          {
+            success: false,
+            error: 'lineTargetId must match ^[UCR][0-9a-f]{32}$',
+          },
           400,
         );
       }
@@ -163,13 +177,11 @@ route.put('/api/notification-settings', async (c) => {
       },
     });
 
-    // テスト通知を enqueue (target_id が設定済みかつ reconciliation_completed が
-    // enabled の場合のみ)
-    if (
-      nextTargetId &&
-      nextEnabled.includes('reconciliation_completed') &&
-      isEventEnabled(updated, 'reconciliation_completed')
-    ) {
+    // Codex full review MEDIUM #5 反映: テスト通知は enabledEvents に依存させない。
+    // target_id が新規 / 更新された場合は強制的に reconciliation_completed の
+    // dummy payload を enqueue (実送信時に enabled チェックが走る場合は
+    // dispatcher が skip する。下記 isTest フラグで dispatcher 側 logic も区別可能)
+    if (nextTargetId) {
       const testKey = `settings_test:${Date.now()}`;
       await enqueueDelivery(c.env.DB, {
         idempotencyKey: testKey,

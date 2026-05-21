@@ -113,7 +113,10 @@ async function runReconciliationReport(
     return;
   }
 
-  // active な reconciliations 行を取得 (この source_job が紐付け先)
+  // Codex full review HIGH #4 反映:
+  //   source_reconciliation_job_id だけで絞る (`status='active'` を外す)。
+  //   reconciliation rerun で archived に倒された後でも、当時の rows を読みに行ける。
+  //   これにより report_job が「ジョブ開始時の snapshot」として機能する。
   const rowsResult = await env.DB
     .prepare(
       `SELECT r.match_status, r.match_method, r.match_score, r.warnings,
@@ -125,7 +128,7 @@ async function runReconciliationReport(
        LEFT JOIN dispatch_records d ON d.id = r.dispatch_id
        LEFT JOIN client_records cr ON cr.id = r.client_record_id
        LEFT JOIN drivers dv ON dv.id = COALESCE(d.driver_id, cr.driver_id)
-       WHERE r.reconciliation_job_id = ? AND r.status = 'active'
+       WHERE r.reconciliation_job_id = ?
        ORDER BY r.match_status, r.match_score DESC`,
     )
     .bind(job.source_reconciliation_job_id)
@@ -166,10 +169,15 @@ async function runReconciliationReport(
     };
   });
 
+  // Codex full review MEDIUM #2 反映: generatedAt を JST 形式で表示
+  //   (toISOString() は UTC を返すので "JST" suffix を付けるとずれる)
+  const { toJstString } = await import('@line-crm/db');
+  const generatedAt = toJstString(new Date()).replace('T', ' ').slice(0, 19) + ' JST';
+
   // 生成
   const result = await generateReconciliationReportPdf(env.STEELO_FILES, {
     period: sourceJob.period,
-    generatedAt: new Date().toISOString().replace('T', ' ').slice(0, 19) + ' JST',
+    generatedAt,
     totals: {
       matched: sourceJob.matched_count,
       clientOnly: sourceJob.client_only_count,
@@ -178,6 +186,13 @@ async function runReconciliationReport(
     warningCounts,
     rows,
   });
+
+  // Codex full review MEDIUM #1 反映: 5MB 超で warn ログ
+  if (result.byteSize > 5 * 1024 * 1024) {
+    console.warn(
+      `[report-job] PDF size ${(result.byteSize / 1024 / 1024).toFixed(2)}MB exceeds 5MB threshold (job=${job.id}, period=${sourceJob.period})`,
+    );
+  }
 
   // R2 にアップロード
   const r2Key = `reports/${sourceJob.period}/${job.report_type}_${job.id}.pdf`;

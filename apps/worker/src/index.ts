@@ -817,11 +817,27 @@ export async function notFoundHandler(
 app.notFound(notFoundHandler);
 
 // Scheduled handler for cron triggers — runs for all active LINE accounts
+//
+// Codex full review HIGH #2 反映: Phase 3 で cron triggers が 4 つに増えたため
+// (`*/5`, `0 */6`, `*/1`, `0 0 1 * *`)、cron 毎に処理を限定する:
+//   - LINE Harness 既存処理 (broadcasts, reminders, expirer 等): `*/5` + `0 */6` のみ
+//   - STEELO Phase 1/2 系 (payment / reconciliation / llm fallback): `*/5` のみ
+//   - Phase 3 dispatcher / baseline / streak: 専用 cron で分岐
 async function scheduled(
   event: ScheduledEvent,
   env: Env['Bindings'],
   _ctx: ExecutionContext,
 ): Promise<void> {
+  const isLegacyTick = event.cron === '*/5 * * * *' || event.cron === '0 */6 * * *';
+
+  // LINE Harness 既存処理は Phase 3 前と同じ cron でのみ実行
+  if (!isLegacyTick) {
+    // Phase 3 専用 cron (*/1 / 0 0 1) では LINE Harness 既存処理を skip し、
+    // 末尾の Phase 3 分岐だけ実行する
+    await runPhase3Cron(event, env);
+    return;
+  }
+
   // Get all active accounts from DB
   const dbAccounts = await getLineAccounts(env.DB);
 
@@ -925,6 +941,7 @@ async function scheduled(
   // `重複:` tag rows untouched until that replacement lands.
 
   // STEELO Phase 1: 取り残された running ジョブを failed に倒す（recovery）
+  // (この時点で既に isLegacyTick=true、つまり cron */5 or 0 */6 のみ)
   try {
     const recovered = await recoverStuckPaymentJobs(env.DB, 30);
     if (recovered > 0) {
@@ -1002,11 +1019,21 @@ async function scheduled(
       console.error('[steelo] llm-parse fallback list error:', e);
     }
   }
+  // STEELO Phase 3 専用処理 (event.cron で分岐)
+  // 関数化して、`*/1` / `0 0 1` 時の早期 return 経路と共有
+  await runPhase3Cron(event, env);
+}
 
-  // STEELO Phase 3: cron 別の処理分岐 (Codex Phase 3 round 2 HIGH #6)
-  // - `0 0 1 * *` (JST 9:00 月初): baseline recompute + monthly_reminder + 24h LLM streak 確認
-  // - `*/1 * * * *` (毎分): notification-dispatcher
-  // - `*/5 * * * *` (5 分粒度): LLM 連続失敗の頻繁チェック (cooldown は 24h)
+/**
+ * STEELO Phase 3 cron 別処理 (Codex Phase 3 round 2 HIGH #6 / full review HIGH #2 反映)
+ * - 月初 cron (0 0 1 * * = JST 9:00): baseline recompute + monthly_reminder
+ * - 毎分 cron: notification-dispatcher
+ * - 5 分 cron: report stuck recovery + LLM 連続失敗 streak 検知
+ */
+async function runPhase3Cron(
+  event: ScheduledEvent,
+  env: Env['Bindings'],
+): Promise<void> {
   if (event.cron === '0 0 1 * *') {
     // 月初: baseline recompute
     try {
@@ -1095,26 +1122,42 @@ async function scheduled(
     }
   }
 
-  // `*/5` cron: LLM 連続失敗 streak 検知 (24h cooldown は isCooldownActive で判定)
+  // `*/5` cron: LLM 連続失敗 streak 検知
+  // Codex full review HIGH #6 反映: 「24h 内 failed 件数」ではなく
+  //   「直近 5 件以上が連続で failed」を判定する (成功で streak を切る)
+  // Codex full review HIGH #7 反映: created_at の cutoff は toJstString() で
+  //   JST 形式に揃え lexical 比較の安全性を確保 (`datetime('now')` の SQLite 形式 vs
+  //   JST ISO+09:00 形式の不整合を避ける)
   if (event.cron === '*/5 * * * *') {
     try {
-      const { isCooldownActive, enqueueDelivery } = await import('@line-crm/db');
+      const { isCooldownActive, enqueueDelivery, toJstString } = await import(
+        '@line-crm/db'
+      );
       const cooldown = await isCooldownActive(env.DB, 'llm_parse_failed_streak', 24);
       if (!cooldown) {
-        // 直近 24h で `failed` が 5 件以上なら enqueue
+        const cutoff = toJstString(new Date(Date.now() - 24 * 3600 * 1000));
+        // 直近 24h の parse 結果を時系列順 (新しい順) で取得
         const recent = await env.DB
           .prepare(
-            `SELECT COUNT(*) AS n FROM llm_parse_results
-             WHERE status = 'failed' AND created_at >= datetime('now', '-1 day')`,
+            `SELECT status FROM llm_parse_results
+             WHERE created_at >= ?
+             ORDER BY created_at DESC LIMIT 20`,
           )
-          .first<{ n: number }>();
-        if ((recent?.n ?? 0) >= 5) {
+          .bind(cutoff)
+          .all<{ status: string }>();
+        // 先頭から連続で `failed` の件数をカウント、success が出たら streak が切れる
+        let streak = 0;
+        for (const r of recent.results) {
+          if (r.status === 'failed') streak++;
+          else break;
+        }
+        if (streak >= 5) {
           await enqueueDelivery(env.DB, {
             idempotencyKey: `llm_failed_streak:${new Date().toISOString().slice(0, 13)}`,
             eventType: 'llm_parse_failed_streak',
-            eventPayloadJson: JSON.stringify({ count: recent?.n ?? 0 }),
+            eventPayloadJson: JSON.stringify({ count: streak }),
           });
-          console.log(`[steelo] phase3 llm_parse_failed_streak enqueued (count=${recent?.n})`);
+          console.log(`[steelo] phase3 llm_parse_failed_streak enqueued (streak=${streak})`);
         }
       }
     } catch (e) {
