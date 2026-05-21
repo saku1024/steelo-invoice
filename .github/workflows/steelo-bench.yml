@@ -9,20 +9,20 @@ name: STEELO Bench Gate
 on:
   pull_request:
     paths:
-      - 'apps/worker/src/services/excel-export.ts'
-      - 'apps/worker/src/services/excel-export.bench.ts'
-      - 'apps/worker/src/services/payment-calculator.ts'
+      - 'apps/worker/src/**'
+      - 'packages/shared/src/**'
+      - 'packages/db/src/**'
+      - 'packages/db/migrations/**'
       - 'apps/worker/package.json'
-      - 'packages/shared/src/steelo.ts'
       - '.github/workflows/steelo-bench.yml'
   push:
     branches: [main]
     paths:
-      - 'apps/worker/src/services/excel-export.ts'
-      - 'apps/worker/src/services/excel-export.bench.ts'
-      - 'apps/worker/src/services/payment-calculator.ts'
+      - 'apps/worker/src/**'
+      - 'packages/shared/src/**'
+      - 'packages/db/src/**'
+      - 'packages/db/migrations/**'
       - 'apps/worker/package.json'
-      - 'packages/shared/src/steelo.ts'
       - '.github/workflows/steelo-bench.yml'
   workflow_dispatch:
 
@@ -50,7 +50,7 @@ jobs:
       - name: STEELO bench gate (excel-export)
         run: pnpm --filter worker test:bench
 
-      - name: STEELO Phase 1 ユニットテスト
+      - name: STEELO Phase 1 + 2 ユニットテスト
         run: |
           cd apps/worker
           pnpm exec vitest run \
@@ -61,7 +61,10 @@ jobs:
             src/services/payment-calculator.test.ts \
             src/services/excel-import.test.ts \
             src/services/excel-export.test.ts \
-            src/steelo-integration.test.ts
+            src/services/reconciliation.test.ts \
+            src/services/llm-client.test.ts \
+            src/steelo-integration.test.ts \
+            src/phase2-integration.test.ts
 
       - name: STEELO db ユニットテスト
         run: |

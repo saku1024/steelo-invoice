@@ -135,8 +135,8 @@ export async function getLLMStats(
     .prepare(
       `SELECT
          COUNT(*) AS total,
-         SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS success,
-         SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+         COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END), 0) AS success,
+         COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0) AS failed,
          COALESCE(SUM(token_input), 0) AS token_input_sum,
          COALESCE(SUM(token_output), 0) AS token_output_sum,
          COALESCE(SUM(cost_usd), 0) AS cost_usd_sum
@@ -144,13 +144,14 @@ export async function getLLMStats(
     )
     .bind(...vals)
     .first<LLMStatsRow>();
-  return r ?? {
-    total: 0,
-    success: 0,
-    failed: 0,
-    token_input_sum: 0,
-    token_output_sum: 0,
-    cost_usd_sum: 0,
+  // SQLite では行は必ず返るが null safety で fallback
+  return {
+    total: r?.total ?? 0,
+    success: r?.success ?? 0,
+    failed: r?.failed ?? 0,
+    token_input_sum: r?.token_input_sum ?? 0,
+    token_output_sum: r?.token_output_sum ?? 0,
+    cost_usd_sum: r?.cost_usd_sum ?? 0,
   };
 }
 

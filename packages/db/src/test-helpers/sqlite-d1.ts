@@ -70,11 +70,26 @@ export function createSqliteD1(schemaSqlPath?: string): SqliteD1 {
   const raw = new Database(':memory:');
   raw.pragma('foreign_keys = ON');
 
-  const schemaPath =
-    schemaSqlPath ??
-    resolve(__dirname, '..', '..', 'migrations', '046_steelo_phase1.sql');
-  const sql = readFileSync(schemaPath, 'utf8');
-  raw.exec(sql);
+  if (schemaSqlPath) {
+    raw.exec(readFileSync(schemaSqlPath, 'utf8'));
+  } else {
+    // STEELO Phase 1 + Phase 2 のテストで両方使えるよう、関連 migration を順に適用
+    const migrationsDir = resolve(__dirname, '..', '..', 'migrations');
+    const orderedMigrations = [
+      '046_steelo_phase1.sql',
+      '047_phase2_reconciliation.sql',
+    ];
+    for (const name of orderedMigrations) {
+      try {
+        raw.exec(readFileSync(resolve(migrationsDir, name), 'utf8'));
+      } catch (e) {
+        // migration が見つからない場合は警告のみ（Phase 1 のみのテストでも動くように）
+        if ((e as { code?: string }).code !== 'ENOENT') {
+          throw e;
+        }
+      }
+    }
+  }
 
   const d1 = {
     prepare(sql: string) {

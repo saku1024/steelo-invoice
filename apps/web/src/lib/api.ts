@@ -42,6 +42,11 @@ import type {
   DriverPaymentSummary,
   PaymentJob,
   AuditLog,
+  // STEELO Phase 2
+  Reconciliation,
+  ReconciliationJob,
+  MatchStatus,
+  LLMParseResult,
 } from '@line-crm/shared'
 
 /** Broadcast type from API (now camelCase after worker serialization) */
@@ -1858,6 +1863,94 @@ export const steelo = {
       return fetchApi<ApiResponse<{ items: AuditLog[]; total: number }>>(
         `/api/audit-logs${qs.toString() ? '?' + qs : ''}`,
       )
+    },
+  },
+  // STEELO Phase 2: 自動照合
+  reconciliations: {
+    list: (params: {
+      period: string
+      matchStatus?: MatchStatus
+      reviewed?: boolean
+      limit?: number
+      offset?: number
+    }) => {
+      const qs = new URLSearchParams()
+      qs.set('period', params.period)
+      if (params.matchStatus) qs.set('match_status', params.matchStatus)
+      if (params.reviewed !== undefined) qs.set('reviewed', String(params.reviewed))
+      if (params.limit !== undefined) qs.set('limit', String(params.limit))
+      if (params.offset !== undefined) qs.set('offset', String(params.offset))
+      return fetchApi<ApiResponse<{ items: Reconciliation[]; total: number }>>(
+        `/api/reconciliations?${qs}`,
+      )
+    },
+    get: (id: string) =>
+      fetchApi<ApiResponse<Reconciliation>>(`/api/reconciliations/${id}`),
+    review: (id: string, body: { reviewed: boolean; notes?: string }) =>
+      fetchApi<ApiResponse<Reconciliation>>(
+        `/api/reconciliations/${id}/review`,
+        { method: 'POST', body: JSON.stringify(body) },
+      ),
+    manualMatch: (id: string, body: { dispatchId?: string; clientRecordId?: string }) =>
+      fetchApi<ApiResponse<Reconciliation>>(
+        `/api/reconciliations/${id}/manual-match`,
+        { method: 'POST', body: JSON.stringify(body) },
+      ),
+    enqueueJob: (period: string) =>
+      fetchApi<ApiResponse<{ jobId: string; statusUrl: string }>>(
+        '/api/reconciliations/jobs',
+        { method: 'POST', body: JSON.stringify({ period }) },
+      ),
+    getJob: (jobId: string) =>
+      fetchApi<ApiResponse<ReconciliationJob>>(`/api/reconciliations/jobs/${jobId}`),
+    /** ジョブを完了または失敗まで poll */
+    pollJob: async (
+      jobId: string,
+      opts: { intervalMs?: number; timeoutMs?: number } = {},
+    ): Promise<ReconciliationJob> => {
+      const interval = opts.intervalMs ?? 3000
+      const timeout = opts.timeoutMs ?? 5 * 60_000
+      const start = Date.now()
+      while (Date.now() - start < timeout) {
+        const r = await fetchApi<ApiResponse<ReconciliationJob>>(
+          `/api/reconciliations/jobs/${jobId}`,
+        )
+        if (!r.success) throw new Error('job lookup failed')
+        if (r.data.status === 'completed' || r.data.status === 'failed') {
+          return r.data
+        }
+        await new Promise((resolve) => setTimeout(resolve, interval))
+      }
+      throw new Error('reconciliation job polling timed out')
+    },
+  },
+  llmParse: {
+    reparse: (lineMessageId: string) =>
+      fetchApi<ApiResponse<{
+        status: 'success' | 'skipped' | 'failed'
+        isDispatch: boolean
+        dispatchRecordIds: string[]
+      }>>(
+        `/api/llm-parse/messages/${lineMessageId}/reparse`,
+        { method: 'POST' },
+      ),
+    getResult: (lineMessageId: string) =>
+      fetchApi<ApiResponse<LLMParseResult & { outputJson: string | null }>>(
+        `/api/llm-parse/results/${lineMessageId}`,
+      ),
+    stats: (params: { from?: string; to?: string } = {}) => {
+      const qs = new URLSearchParams()
+      if (params.from) qs.set('from', params.from)
+      if (params.to) qs.set('to', params.to)
+      return fetchApi<ApiResponse<{
+        total: number
+        success: number
+        failed: number
+        successRate: number
+        tokenInputSum: number
+        tokenOutputSum: number
+        costUsdSum: number
+      }>>(`/api/llm-parse/stats${qs.toString() ? '?' + qs : ''}`)
     },
   },
 }
