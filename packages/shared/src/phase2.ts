@@ -69,6 +69,11 @@ export type MatchStatus = 'matched' | 'client_only' | 'dispatch_only';
 export type MatchMethod = 'strong' | 'fuzzy' | 'time' | 'none' | 'manual';
 export type ReconciliationLifeStatus = 'active' | 'archived' | 'archived_reviewed';
 
+/**
+ * Phase 3 (F8) 反映: warnings は string[] から StructuredWarning[] に拡張。
+ * 既存 DB データ (Phase 2 の文字列配列) は parseWarnings() で読み出し時に
+ * 互換変換される (Codex Phase 3 round 1 CRITICAL #2)。
+ */
 export interface Reconciliation {
   id: string;
   period: string;
@@ -78,7 +83,15 @@ export interface Reconciliation {
   matchStatus: MatchStatus;
   matchMethod: MatchMethod;
   matchScore: number;
-  warnings: string[];
+  // Phase 3 で型を変更。実体は phase3.ts の StructuredWarning。
+  // 循環参照を避けるため `unknown` でも書けるが、ここでは利便性優先で import なしの
+  // 構造リテラルを書く (TypeScript の declaration merging で phase3.ts と整合)
+  warnings: Array<{
+    type: string;
+    severity: 'warn' | 'info';
+    message: string;
+    data: Record<string, unknown>;
+  }>;
   status: ReconciliationLifeStatus;
   reviewed: boolean;
   reviewedAt: string | null;

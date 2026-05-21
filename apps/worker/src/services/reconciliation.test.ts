@@ -179,39 +179,64 @@ describe('reconcile', () => {
     expect(c2.dispatchId).toBe('d-B');
   });
 
-  it('client.driver_id が null なら client_only', () => {
+  it('client.driver_id が null なら client_only (structured warning)', () => {
     const r = reconcile({
       dispatches: [baseDispatch('d-1')],
       clientRecords: [baseClient('c-1', { driver_id: null })],
     });
     const co = r.rows.find((row) => row.matchStatus === 'client_only')!;
-    expect(co.warnings).toContain('client record has no driver_id');
+    expect(co.warnings).toHaveLength(1);
+    expect(co.warnings[0].type).toBe('legacy_warning');
+    expect(co.warnings[0].message).toBe('client record has no driver_id');
+    expect(co.warnings[0].data.reason).toBe('no_driver_id');
     expect(r.summary.dispatchOnly).toBe(1);
   });
 
-  it('運賃が中央値から 50% 以上乖離していたら fare_deviation warning', () => {
-    const r = reconcile({
-      dispatches: [
-        baseDispatch('d-1', { work_date: '2026-05-01' }),
-        baseDispatch('d-2', { work_date: '2026-05-02' }),
-        baseDispatch('d-3', { work_date: '2026-05-03' }),
-      ],
-      clientRecords: [
-        baseClient('c-1', { work_day: 1, fare: 7000 }),
-        baseClient('c-2', { work_day: 2, fare: 7500 }),
-        baseClient('c-3', { work_day: 3, fare: 30000 }), // 異常値
-      ],
-    });
-    const c3 = r.rows.find((row) => row.clientRecordId === 'c-3')!;
-    expect(c3.warnings.some((w) => w.startsWith('fare_deviation:'))).toBe(true);
-  });
-
-  it('invalid work_day は client_only にして warning', () => {
+  it('invalid work_day は client_only にして structured warning', () => {
     const r = reconcile({
       dispatches: [],
       clientRecords: [baseClient('c-1', { work_day: 99 })],
     });
     expect(r.rows[0].matchStatus).toBe('client_only');
-    expect(r.rows[0].warnings).toContain('invalid work_day for period');
+    expect(r.rows[0].warnings[0].message).toBe('invalid work_day for period');
+    expect(r.rows[0].warnings[0].data.reason).toBe('invalid_work_day');
+  });
+
+  it('anomalyContext 未指定なら anomaly warnings は生成されない', () => {
+    // fare 異常値があっても、anomalyContext を渡さなければ fare_deviation_high は出ない
+    const r = reconcile({
+      dispatches: [baseDispatch('d-1')],
+      clientRecords: [baseClient('c-1', { fare: 30000 })],
+      // anomalyContext: undefined
+    });
+    const matched = r.rows.find((row) => row.matchStatus === 'matched')!;
+    expect(matched.warnings).toHaveLength(0);
+  });
+
+  it('anomalyContext あり: baseline から外れた fare で fare_deviation_high', () => {
+    const r = reconcile({
+      dispatches: [baseDispatch('d-1')],
+      clientRecords: [baseClient('c-1', { fare: 30000 })],
+      anomalyContext: {
+        baselines: new Map([
+          [
+            'd-A|築地チャーター',
+            {
+              driverId: 'd-A',
+              taskName: '築地チャーター',
+              medianFare: 7500,
+              sdFare: 1200,
+              sampleSize: 12,
+              baselineScope: 'task',
+            },
+          ],
+        ]),
+        dispatchCountByDriverDate: new Map(),
+      },
+    });
+    const matched = r.rows.find((row) => row.matchStatus === 'matched')!;
+    const fareWarn = matched.warnings.find((w) => w.type === 'fare_deviation_high');
+    expect(fareWarn).toBeDefined();
+    expect(fareWarn?.severity).toBe('warn');
   });
 });

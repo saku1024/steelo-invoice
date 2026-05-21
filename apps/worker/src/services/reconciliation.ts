@@ -1,4 +1,4 @@
-// STEELO Phase 2 F4: dispatch_records × client_records の照合エンジン。
+// STEELO Phase 2/3 F4: dispatch_records × client_records の照合エンジン。
 //
 // 純粋関数として実装。月次照合ジョブ (reconciliation-job.ts) から呼ばれる。
 //
@@ -8,8 +8,19 @@
 //      strong/fuzzy/time 候補を探す
 //   3. 最良スコアでマッチを決め、残った dispatch を dispatch_only、
 //      残った client を client_only として記録
-import type { MatchMethod, MatchStatus } from '@line-crm/shared';
+//
+// Phase 3 (F8) 反映:
+//   warnings を文字列配列から StructuredWarning[] に変更し、anomaly-detector.ts の
+//   純粋関数を呼び出して 5 種類の構造化警告を生成する。anomalyContext (baselines +
+//   dispatchCountByDriverDate) は呼び出し側 (reconciliation-job) が事前に作る。
+import type { MatchMethod, MatchStatus, StructuredWarning } from '@line-crm/shared';
 import { buildCalendarDate } from './date-validation.js';
+import {
+  detectAnomalies,
+  type AnomalyContext,
+  type ClientLikeForAnomaly,
+  type DispatchLikeForAnomaly,
+} from './anomaly-detector.js';
 
 export interface DispatchLike {
   id: string;
@@ -38,14 +49,20 @@ export interface MatchResultRow {
   matchStatus: MatchStatus;
   matchMethod: MatchMethod;
   matchScore: number;
-  warnings: string[];
+  /** Phase 3: 構造化 warnings。serialize は serializeWarnings() で JSON 化 */
+  warnings: StructuredWarning[];
 }
 
 export interface MatchInput {
   dispatches: DispatchLike[];
   clientRecords: ClientLike[];
-  /** 警告閾値: 同 driver の運賃中央値からどれだけ乖離したら warning にするか */
-  fareDeviationThreshold?: number; // 0.5 = 50%
+  /**
+   * Phase 3 (F8) で導入。anomaly-detector に渡す context (baselines +
+   * dispatchCountByDriverDate)。未指定の場合は構造的な warning (driver_id null /
+   * invalid work_day) のみ生成し、運賃乖離・時刻矛盾等は判定しない。
+   * 通常 reconciliation-job が事前に集計して渡す。
+   */
+  anomalyContext?: AnomalyContext;
 }
 
 export interface MatchSummary {
@@ -71,12 +88,8 @@ export function reconcile(input: MatchInput): {
   rows: MatchResultRow[];
   summary: MatchSummary;
 } {
-  const { dispatches, clientRecords } = input;
-  const fareDeviationThreshold = input.fareDeviationThreshold ?? 0.5;
+  const { dispatches, clientRecords, anomalyContext } = input;
   const rows: MatchResultRow[] = [];
-
-  // 同 driver の運賃中央値（warnings 用）
-  const fareMedianByDriver = computeFareMedianByDriver(clientRecords);
 
   // dispatch を (driver_id, work_date) で索引
   const dispatchIndex = new Map<string, DispatchLike[]>();
@@ -95,16 +108,30 @@ export function reconcile(input: MatchInput): {
     score: number;
   }
   const edges: Edge[] = [];
-  const skipClientReason = new Map<string, string>(); // client_only の事前確定用
+  const skipClientReason = new Map<string, StructuredWarning>(); // client_only の事前確定用
 
   for (const cr of clientRecords) {
     if (cr.driver_id === null) {
-      skipClientReason.set(cr.id, 'client record has no driver_id');
+      skipClientReason.set(cr.id, {
+        type: 'legacy_warning',
+        severity: 'info',
+        message: 'client record has no driver_id',
+        data: { reason: 'no_driver_id', client_record_id: cr.id },
+      });
       continue;
     }
     const dateStr = clientDateString(cr.period, cr.work_day);
     if (!dateStr) {
-      skipClientReason.set(cr.id, 'invalid work_day for period');
+      skipClientReason.set(cr.id, {
+        type: 'legacy_warning',
+        severity: 'info',
+        message: 'invalid work_day for period',
+        data: {
+          reason: 'invalid_work_day',
+          period: cr.period,
+          work_day: cr.work_day,
+        },
+      });
       continue;
     }
     const candidates = dispatchIndex.get(`${cr.driver_id}|${dateStr}`) ?? [];
@@ -151,7 +178,13 @@ export function reconcile(input: MatchInput): {
     }
     const matchedEdge = matchedByClient.get(cr.id);
     const matchedDispatch = matchedEdge ? dispatchById.get(matchedEdge.dispatchId) : undefined;
-    const warnings = collectWarnings(cr, matchedDispatch, fareMedianByDriver, fareDeviationThreshold);
+    const warnings = anomalyContext
+      ? detectAnomalies({
+          dispatch: matchedDispatch ? toDispatchForAnomaly(matchedDispatch) : null,
+          client: toClientForAnomaly(cr),
+          context: anomalyContext,
+        })
+      : [];
     if (matchedEdge) {
       rows.push({
         dispatchId: matchedEdge.dispatchId,
@@ -173,16 +206,24 @@ export function reconcile(input: MatchInput): {
     }
   }
 
-  // 5. 未マッチの dispatch を dispatch_only として追加
+  // 5. 未マッチの dispatch を dispatch_only として追加。
+  //    Phase 3: dispatch_only 行にも overload 等の warning を出す可能性あり
   for (const d of dispatches) {
     if (!dispatchUsed.has(d.id)) {
+      const warnings = anomalyContext
+        ? detectAnomalies({
+            dispatch: toDispatchForAnomaly(d),
+            client: null,
+            context: anomalyContext,
+          })
+        : [];
       rows.push({
         dispatchId: d.id,
         clientRecordId: null,
         matchStatus: 'dispatch_only',
         matchMethod: 'none',
         matchScore: 0,
-        warnings: [],
+        warnings,
       });
     }
   }
@@ -274,57 +315,28 @@ function clientDateString(period: string, workDay: number): string | null {
   return buildCalendarDate(period, workDay);
 }
 
-function computeFareMedianByDriver(records: ClientLike[]): Map<string, number> {
-  const groups = new Map<string, number[]>();
-  for (const r of records) {
-    if (r.driver_id && r.fare !== null) {
-      const arr = groups.get(r.driver_id);
-      if (arr) arr.push(r.fare);
-      else groups.set(r.driver_id, [r.fare]);
-    }
-  }
-  const med = new Map<string, number>();
-  for (const [driverId, fares] of groups) {
-    if (fares.length === 0) continue;
-    const sorted = [...fares].sort((a, b) => a - b);
-    med.set(driverId, sorted[Math.floor(sorted.length / 2)]);
-  }
-  return med;
+/**
+ * Phase 3: ClientLike → ClientLikeForAnomaly 変換 (anomaly-detector 入力用)
+ */
+function toClientForAnomaly(cr: ClientLike): ClientLikeForAnomaly {
+  return {
+    id: cr.id,
+    driver_id: cr.driver_id,
+    task_name: cr.task_name,
+    start_time: cr.start_time,
+    end_time: cr.end_time,
+    fare: cr.fare,
+    advance_payment: cr.advance_payment,
+  };
 }
 
-/**
- * Codex Phase 2 review MEDIUM #17 反映:
- * 仕様の「dispatch メモがあるのに client.advance_payment=0」は DispatchLike に
- * notes 列が無いため Phase 2 では実装しない。Phase 3 で DispatchLike を拡張して
- * 対応する。Phase 2 では確実に検出できる以下のみ:
- *   - fare_deviation: client.fare が同 driver の中央値から閾値以上乖離
- *   - advance_payment_without_dispatch: 立替金があるが dispatch にマッチしない
- */
-function collectWarnings(
-  cr: ClientLike,
-  matchedDispatch: DispatchLike | undefined,
-  fareMedianByDriver: Map<string, number>,
-  threshold: number
-): string[] {
-  const warnings: string[] = [];
-
-  // 運賃乖離 warning
-  if (cr.driver_id && cr.fare !== null) {
-    const median = fareMedianByDriver.get(cr.driver_id);
-    if (median && median > 0) {
-      const deviation = Math.abs(cr.fare - median) / median;
-      if (deviation >= threshold) {
-        warnings.push(
-          `fare_deviation: fare=${cr.fare}, median=${median}, deviation=${(deviation * 100).toFixed(0)}%`
-        );
-      }
-    }
-  }
-
-  // 立替金あるが dispatch にマッチしない
-  if (cr.advance_payment > 0 && matchedDispatch === undefined) {
-    warnings.push('advance_payment_without_dispatch');
-  }
-
-  return warnings;
+function toDispatchForAnomaly(d: DispatchLike): DispatchLikeForAnomaly {
+  return {
+    id: d.id,
+    driver_id: d.driver_id,
+    work_date: d.work_date,
+    task_name: d.task_name,
+    start_time: d.start_time,
+    end_time: d.end_time,
+  };
 }

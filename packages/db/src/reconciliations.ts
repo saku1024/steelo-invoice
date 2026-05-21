@@ -37,6 +37,11 @@ export interface ReconciliationJobRow {
   active_period_key: string | null;
 }
 
+/**
+ * Phase 3: warnings は Phase 2 の string[] から JSON serialize 済み文字列に変更。
+ * 呼び出し側 (reconciliation-job 等) が `serializeWarnings()` で StructuredWarning[]
+ * を JSON 文字列に変換してから渡す。null = warning 無し。
+ */
 export interface InsertReconciliationInput {
   period: string;
   reconciliationJobId: string;
@@ -45,7 +50,7 @@ export interface InsertReconciliationInput {
   matchStatus: 'matched' | 'client_only' | 'dispatch_only';
   matchMethod: 'strong' | 'fuzzy' | 'time' | 'none' | 'manual';
   matchScore: number;
-  warnings: string[];
+  warningsJson: string | null;
 }
 
 // =============================================================================
@@ -147,7 +152,7 @@ function buildInsertStatement(
       r.matchStatus,
       r.matchMethod,
       r.matchScore,
-      r.warnings.length > 0 ? JSON.stringify(r.warnings) : null
+      r.warningsJson
     );
 }
 

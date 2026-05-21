@@ -84,6 +84,8 @@ import auditLogs from './routes/audit-logs.js';
 // STEELO Phase 2
 import reconciliationsRoute from './routes/reconciliations.js';
 import llmParseRoute from './routes/llm-parse.js';
+// STEELO Phase 3
+import anomalyBaselinesRoute from './routes/anomaly-baselines.js';
 import { steeloCors, isSteeloPath } from './middleware/steelo-cors.js';
 import { runPaymentJob } from './services/payment-batch-job.js';
 import { handleLLMParseJob } from './services/llm-parser.js';
@@ -129,6 +131,8 @@ export type Env = {
     ANTHROPIC_API_KEY?: string;    // Claude Haiku 用 API key（wrangler secret）
     LLM_PARSE_QUEUE?: Queue;       // LINE メッセージ LLM 解析キュー
     RECONCILIATION_QUEUE?: Queue;  // 月次照合ジョブキュー
+    // STEELO Phase 3
+    REPORT_QUEUE?: Queue;          // 月次 PDF レポート生成ジョブキュー
   };
   Variables: {
     staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' };
@@ -222,6 +226,8 @@ app.route('/', auditLogs);
 // STEELO Phase 2
 app.route('/', reconciliationsRoute);
 app.route('/', llmParseRoute);
+// STEELO Phase 3
+app.route('/', anomalyBaselinesRoute);
 
 // Self-hosted QR code proxy — prevents leaking ref tokens to third-party services
 app.get('/api/qr', async (c) => {
@@ -991,6 +997,28 @@ async function scheduled(
       console.error('[steelo] llm-parse fallback list error:', e);
     }
   }
+
+  // STEELO Phase 3: cron `0 0 1 * *` (JST 9:00 月初) で baseline 自動再計算
+  // Codex Phase 3 round 2 HIGH #6: event.cron で処理を分岐し、毎 cron で全部走らせない
+  if (event.cron === '0 0 1 * *') {
+    try {
+      const { runAnomalyBaselineJob } = await import(
+        './services/anomaly-baseline-job.js'
+      );
+      // 当月の period (UTC で 1 日 0:00 = JST 9:00 月初)
+      const now = new Date();
+      const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+      const result = await runAnomalyBaselineJob(env.DB, { period });
+      console.log(
+        `[steelo] phase3 baseline recompute: period=${period}, task=${result.taskBaselines}, fallback=${result.driverFallbackBaselines}, skipped=${result.skippedDrivers}, ${result.durationMs}ms`,
+      );
+    } catch (e) {
+      console.error('[steelo] phase3 baseline recompute error:', e);
+    }
+  }
+
+  // Phase 3 F9 monthly_reminder / Phase 3 F9 slack-dispatcher (*/1) / Phase 3 F10
+  // report-job fallback は F9/F10 タスクで追加予定
 }
 
 // STEELO Queues consumer。queue name で振り分け:
@@ -1009,6 +1037,9 @@ async function queue(
         await handleLLMParseJob(env, message.body as { lineMessageId: string });
       } else if (batch.queue === 'reconciliation-queue') {
         await runReconciliationJob(env, message.body as { jobId: string });
+      } else if (batch.queue === 'report-queue') {
+        // Phase 3 F10: PDF report job (実装は F10 タスクで追加予定)
+        console.warn('[steelo] report-queue handler not yet implemented (Phase 3 F10)');
       } else {
         console.warn(`[steelo] unknown queue: ${batch.queue}`);
       }

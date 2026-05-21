@@ -19,10 +19,14 @@ import type {
 import { safeAudit } from '../services/audit.js';
 import { runReconciliationJob } from '../services/reconciliation-job.js';
 import { asPeriodStr, clampLimit, clampOffset } from '../services/validation.js';
+import { parseWarnings } from '../services/parse-warnings.js';
 import type { Env } from '../index.js';
 
 const reconciliations = new Hono<Env>();
 
+// Phase 3 (F8) 反映:
+//   API レスポンスは常に StructuredWarning[] を返す。parseWarnings() で
+//   Phase 2 文字列配列と Phase 3 構造化配列の両方を正規化する (Codex round 1 CRITICAL #2)。
 function serialize(r: ReconciliationRow): Reconciliation {
   return {
     id: r.id,
@@ -33,7 +37,7 @@ function serialize(r: ReconciliationRow): Reconciliation {
     matchStatus: r.match_status as MatchStatus,
     matchMethod: r.match_method as Reconciliation['matchMethod'],
     matchScore: r.match_score,
-    warnings: r.warnings ? (JSON.parse(r.warnings) as string[]) : [],
+    warnings: parseWarnings(r.warnings),
     status: r.status as Reconciliation['status'],
     reviewed: Boolean(r.reviewed),
     reviewedAt: r.reviewed_at,

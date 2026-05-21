@@ -340,7 +340,7 @@ describe('Integration: Reconciliation INSERT + archive', () => {
       matchStatus: 'dispatch_only' as const,
       matchMethod: 'none' as const,
       matchScore: 0,
-      warnings: [],
+      warningsJson: null,
     }));
     const n = await insertReconciliations(h.db, rows);
     expect(n).toBe(75);
@@ -362,7 +362,7 @@ describe('Integration: Reconciliation INSERT + archive', () => {
         matchStatus: 'dispatch_only',
         matchMethod: 'none',
         matchScore: 0,
-        warnings: [],
+        warningsJson: null,
       },
       {
         period: '2026-05',
@@ -372,7 +372,7 @@ describe('Integration: Reconciliation INSERT + archive', () => {
         matchStatus: 'matched',
         matchMethod: 'strong',
         matchScore: 1,
-        warnings: [],
+        warningsJson: null,
       },
     ]);
     // 1 行を reviewed=1 に
@@ -552,7 +552,7 @@ describe('Integration: Codex Phase 2 review CRITICAL fixes', () => {
         matchStatus: 'dispatch_only',
         matchMethod: 'none',
         matchScore: 0,
-        warnings: [],
+        warningsJson: null,
       },
     ]);
     const r1 = await listReconciliations(h.db, { period: '2026-05' });
@@ -573,7 +573,7 @@ describe('Integration: Codex Phase 2 review CRITICAL fixes', () => {
         matchStatus: 'client_only',
         matchMethod: 'none',
         matchScore: 0,
-        warnings: [],
+        warningsJson: null,
       },
       {
         period: '2026-05',
@@ -583,7 +583,7 @@ describe('Integration: Codex Phase 2 review CRITICAL fixes', () => {
         matchStatus: 'matched',
         matchMethod: 'strong',
         matchScore: 1,
-        warnings: [],
+        warningsJson: null,
       },
     ]);
     const active = await listReconciliations(h.db, { period: '2026-05', status: 'active' });
@@ -713,7 +713,7 @@ describe('Integration: Codex Phase 2 review HIGH fixes', () => {
         matchStatus: 'client_only',
         matchMethod: 'none',
         matchScore: 0,
-        warnings: [],
+        warningsJson: null,
       },
     ]);
     const recon = (await listReconciliations(h.db, { period: '2026-05' })).items[0];
