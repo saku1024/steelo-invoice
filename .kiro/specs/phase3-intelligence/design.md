@@ -54,6 +54,9 @@
 ### Allowed Dependencies
 
 - `pdf-lib` ^1.17 (Workers 互換、Cloudflare 公式ブログで動作確認済)
+- **`@pdf-lib/fontkit` ^1.1** (Codex Phase 3 review CRITICAL #3 反映:
+  日本語フォント等の custom font 埋込に必須。`pdfDoc.registerFontkit(fontkit)`
+  を呼ばないと `embedFont(ttfBytes)` が標準フォント以外で失敗する)
 - `@line-crm/db` / `@line-crm/shared` (既存)
 - 既存 R2 / Queues バインディング
 
@@ -115,11 +118,12 @@ graph TB
 
 | Layer | Choice | Role | Notes |
 |---|---|---|---|
-| PDF | `pdf-lib` ^1.17 | Workers 互換 PDF 生成 | 純 TypeScript、Buffer 依存なし |
-| PDF Font | Noto Sans JP (TTF) | 日本語埋込 | R2 に置いて `embedFont` で参照 |
-| Slack | Incoming Webhook | 通知投稿 | URL は notification_settings に保存 |
-| Queue | 既存 `reconciliation-queue` 流用 | report job consumer も同 queue で | バインディングを `REPORT_QUEUE` で別建てしても可 |
-| Cron | 既存 `0 9 1 * *` 追加 | 月初リマインド | Phase 1+2 の `*/5 * * * *` `0 */6 * * *` に追加 |
+| PDF | `pdf-lib` ^1.17 + `@pdf-lib/fontkit` ^1.1 | Workers 互換 PDF 生成 | fontkit は日本語フォント embedFont の前提条件 |
+| PDF Font | Noto Sans JP (TTF) | 日本語埋込 | R2 `fonts/NotoSansJP-Regular.ttf`、起動時取得失敗は job を failed に倒す |
+| Slack | Incoming Webhook | 通知投稿 | URL は notification_settings に保存 (D1 EAR + マスク表示) |
+| Queue (report) | **`REPORT_QUEUE` (新規、別 queue)** | report job 専用 (Codex CRITICAL #7) | reconciliation-queue 流用すると consumer 分岐が壊れるため別建て。DLQ は `report-dlq` |
+| Notification 再送 | **cron `*/1 * * * *`** | `notification_deliveries.status='pending'` の Slack 再送 | reconciliation-job からは Slack 直接呼び出さない (CRITICAL #5) |
+| Cron | 既存に `0 0 1 * *` (UTC) = JST 9:00 月初 追加 | 月初リマインド | Phase 1+2 の `*/5 * * * *` `0 */6 * * *` と並列。冗長起動は `notification_deliveries.idempotency_key` で防ぐ |
 
 ### F8 異常検知強化フロー
 
@@ -147,33 +151,53 @@ sequenceDiagram
 
 ### F9 Slack 通知フロー
 
+**Codex Phase 3 review CRITICAL #4 / #5 反映**: reconciliation-job からは
+Slack を直接呼ばず、`notification_deliveries` に永続化のみする。
+実送信は cron `*/1 * * * *` の slack-dispatcher が `pending` 行を拾って実行。
+`waitUntil` 30 秒制限内に収まる `1s + 3s + 8s` retry に変更。
+
 ```mermaid
 sequenceDiagram
     participant Job as reconciliation-job.ts
-    participant Cron as scheduled (1 日 9:00 / 毎日)
+    participant Cron1 as scheduled (1 日 9:00 月初)
+    participant Cron2 as scheduled (*/1 min slack-dispatcher)
     participant Notif as slack-notifier.ts
     participant DB as D1
     participant SK as Slack Webhook
 
-    Job->>Notif: notifyReconciliationCompleted({period, summary, warnings})
-    Notif->>DB: SELECT * FROM notification_settings
-    alt enabled_events に含まれる
-        Notif->>SK: POST Block Kit message
-        alt 成功
-            Notif->>DB: audit_logs (slack_notification_sent)
-        else 失敗
-            Notif->>Notif: backoff 1s/5s/30s retry
-            Notif->>DB: audit_logs (slack_notification_failed)
-        end
-    else
-        Note over Notif: skip
+    Job->>DB: INSERT notification_deliveries<br/>(idempotency_key=reconciliation_completed:{jobId},<br/> status=pending, payload_json)
+    Note over Job: job 本体は通知失敗で阻害されない
+
+    Cron1->>DB: SELECT confirmed import_batch for last month
+    alt 該当バッチ無し
+        Cron1->>DB: INSERT notification_deliveries<br/>(idempotency_key=monthly_reminder:{prev_period},<br/> status=pending)
     end
 
-    Cron->>DB: SELECT confirmed import_batch for last month
-    alt 該当バッチ無し
-        Cron->>Notif: notifyMonthlyReminder(prevPeriod)
+    Cron2->>DB: SELECT * FROM notification_deliveries WHERE status='pending' LIMIT 10
+    loop 各 pending row
+        Cron2->>Notif: send(row)
+        Notif->>DB: SELECT * FROM notification_settings
+        alt enabled_events 該当 + URL 設定済み
+            Notif->>SK: POST Block Kit (1s + 3s + 8s retry)
+            alt 成功
+                Notif->>DB: UPDATE status=sent, sent_at
+                Notif->>DB: audit_logs (slack_notification_sent)
+            else 失敗 (4xx)
+                Notif->>DB: UPDATE status=failed, last_error (URL は含めない)
+                Notif->>DB: audit_logs (slack_notification_failed)
+            else 失敗 (5xx / timeout)
+                Notif->>DB: UPDATE attempt_count++ (status は pending のまま、次回 cron で再試行)
+            end
+        else
+            Notif->>DB: UPDATE status=skipped
+            Notif->>DB: audit_logs (slack_notification_skipped)
+        end
     end
 ```
+
+**重要**: cron が 1 分粒度なので、照合完了 → Slack 通知の遅延は最大 1 分。これは
+許容（Slack 通知はユーザ体感の即時性が必須ではない）。即時性が必要になれば
+Phase 4 で `notification-queue` (Cloudflare Queues) に置き換える。
 
 ### F10 PDF レポート生成フロー
 
@@ -234,27 +258,44 @@ sequenceDiagram
 
 ### Service: anomaly-detector.ts
 
+**Codex Phase 3 review HIGH #10 反映**: `dispatch_overload` は集計条件
+（同 driver × 同日 3 件以上）なので、detector を純粋関数に保つために
+`reconciliation-job` が事前集計した `dispatchCountByDriverDate` を渡す形にする。
+
 ```ts
+export type WarningType =
+  | 'fare_deviation_high'
+  | 'time_inversion'
+  | 'advance_payment_without_dispatch'  // Phase 2 から維持
+  | 'advance_payment_without_label'      // Phase 3 新規
+  | 'dispatch_overload'
+  | 'legacy_warning';                    // 旧 string warning の互換
+
 export interface Baseline {
   driverId: string;
-  taskName: string | null; // null = driver 全体フォールバック
-  median: number;
-  sd: number;
+  taskName: string | null;     // null = driver 全体フォールバック
+  medianFare: number;
+  sdFare: number;
   sampleSize: number;
+  baselineScope: 'task' | 'driver_fallback';
+}
+
+export interface AnomalyContext {
+  /** key: `${driverId}|${taskName ?? '_ALL_'}` */
+  baselines: Map<string, Baseline>;
+  /** key: `${driverId}|${YYYY-MM-DD}`、Codex HIGH #10 反映 */
+  dispatchCountByDriverDate: Map<string, number>;
+  fareDeviationThresholdSigma?: number; // default 2.0
 }
 
 export interface AnomalyInput {
   dispatch: DispatchRecordRow | null;
   client: ClientRecordRow | null;
-  baselines: Map<string, Baseline>; // key: `${driverId}|${taskName ?? '_all_'}`
+  context: AnomalyContext;
 }
 
 export interface StructuredWarning {
-  type:
-    | 'fare_deviation_high'
-    | 'time_inversion'
-    | 'advance_payment_without_label'
-    | 'dispatch_overload';
+  type: WarningType;
   severity: 'warn' | 'info';
   message: string;
   data: Record<string, unknown>;
@@ -264,6 +305,30 @@ export function detectAnomalies(input: AnomalyInput): StructuredWarning[];
 ```
 
 純粋関数として実装。Phase 2 の `reconciliation.ts:collectWarnings` を置き換える。
+
+### Service: parse-warnings.ts
+
+**Codex Phase 3 review CRITICAL #2 反映**: 旧 Phase 2 文字列配列 warning との
+後方互換を吸収するヘルパ。API/UI/PDF 層は必ずこれを経由して読み出す。
+
+```ts
+const LEGACY_PREFIX_MAP: Array<[RegExp, WarningType, 'warn' | 'info']> = [
+  [/^fare_deviation:/, 'fare_deviation_high', 'warn'],
+  [/^advance_payment_without_dispatch$/, 'advance_payment_without_dispatch', 'info'],
+];
+
+/**
+ * `reconciliations.warnings` (TEXT JSON 配列) を構造化配列に正規化する。
+ *
+ * - null / 空文字 → []
+ * - 旧 `string[]` → 各要素を legacy_warning か mapped type に変換
+ * - 新 `StructuredWarning[]` → そのまま返す (validate のみ)
+ */
+export function parseWarnings(raw: string | null): StructuredWarning[];
+
+/** 書き込み時用: StructuredWarning[] を JSON 文字列に */
+export function serializeWarnings(warnings: StructuredWarning[]): string | null;
+```
 
 ### Service: slack-notifier.ts
 
@@ -332,11 +397,18 @@ CREATE TABLE IF NOT EXISTS anomaly_baselines (
   median_fare    REAL NOT NULL,
   sd_fare        REAL NOT NULL,
   sample_size    INTEGER NOT NULL,
+  baseline_scope TEXT NOT NULL,                 -- 'task' | 'driver_fallback'
   period_from    TEXT NOT NULL,                 -- "YYYY-MM"
   period_to      TEXT NOT NULL,
-  computed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  UNIQUE (driver_id, task_name)
+  computed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours'))
 );
+-- Codex Phase 3 review HIGH #8 反映:
+--   SQLite の UNIQUE は NULL を別値として扱うため、
+--   partial unique index で `task_name IS NULL` 行と `IS NOT NULL` 行を別々に一意化
+CREATE UNIQUE INDEX IF NOT EXISTS ux_anomaly_baselines_task
+  ON anomaly_baselines (driver_id, task_name) WHERE task_name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_anomaly_baselines_driver_all
+  ON anomaly_baselines (driver_id) WHERE task_name IS NULL;
 CREATE INDEX IF NOT EXISTS idx_anomaly_baselines_driver
   ON anomaly_baselines (driver_id, task_name);
 
@@ -352,45 +424,88 @@ CREATE TABLE IF NOT EXISTS notification_settings (
 );
 INSERT OR IGNORE INTO notification_settings (id) VALUES (1);
 
+-- 通知の送信記録 + 再送キュー (Codex Phase 3 review HIGH #13 反映)
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+  id                TEXT PRIMARY KEY,
+  idempotency_key   TEXT NOT NULL UNIQUE,        -- 例: reconciliation_completed:{jobId}
+  event_type        TEXT NOT NULL,               -- reconciliation_completed | monthly_reminder | llm_parse_failed_streak
+  status            TEXT NOT NULL DEFAULT 'pending', -- pending | sent | failed | skipped
+  attempt_count     INTEGER NOT NULL DEFAULT 0,
+  payload_json      TEXT NOT NULL,               -- Slack Block Kit 構造そのまま
+  last_error        TEXT,                        -- URL 本体は含めない (status + path 末尾のみ)
+  requested_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  sent_at           TEXT,
+  next_retry_at     TEXT                         -- pending で次回試行可能になる時刻
+);
+CREATE INDEX IF NOT EXISTS idx_notification_deliveries_pending
+  ON notification_deliveries (status, next_retry_at) WHERE status = 'pending';
+
 -- レポート生成ジョブ
 CREATE TABLE IF NOT EXISTS report_jobs (
-  id                TEXT PRIMARY KEY,
-  period            TEXT NOT NULL,
-  report_type       TEXT NOT NULL,           -- 'client_summary' | 'reconciliation' | 'payment_summary'
-  status            TEXT NOT NULL DEFAULT 'queued',
-  template_version  INTEGER NOT NULL,
-  r2_key            TEXT,                    -- 完了後に埋まる
-  byte_size         INTEGER,
-  error_message     TEXT,
-  requested_by      TEXT NOT NULL,
-  requested_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
-  started_at        TEXT,
-  completed_at      TEXT
+  id                            TEXT PRIMARY KEY,
+  period                        TEXT NOT NULL,
+  report_type                   TEXT NOT NULL,           -- 'reconciliation' (P0) | 'client_summary' (P1) | 'payment_summary' (P2)
+  status                        TEXT NOT NULL DEFAULT 'queued',
+  template_version              INTEGER NOT NULL,
+  r2_key                        TEXT,                    -- 完了後に埋まる
+  byte_size                     INTEGER,
+  page_count                    INTEGER,
+  -- Codex Phase 3 review MEDIUM #19 反映: 生成元データの identity snapshot
+  source_import_batch_id        TEXT REFERENCES import_batches (id) ON DELETE SET NULL,
+  source_reconciliation_job_id  TEXT REFERENCES reconciliation_jobs (id) ON DELETE SET NULL,
+  source_payment_job_id         TEXT REFERENCES payment_jobs (id) ON DELETE SET NULL,
+  error_message                 TEXT,
+  requested_by                  TEXT NOT NULL,
+  requested_at                  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now', '+9 hours')),
+  started_at                    TEXT,
+  completed_at                  TEXT,
+  -- Codex Phase 3 review CRITICAL #6 反映: 同 period × type の重複起動排他
+  active_report_key             TEXT GENERATED ALWAYS AS (
+    CASE WHEN status IN ('queued', 'running') THEN period || ':' || report_type END
+  ) VIRTUAL,
+  UNIQUE (active_report_key)
 );
 CREATE INDEX IF NOT EXISTS idx_report_jobs_period_status
   ON report_jobs (period, status, requested_at DESC);
 ```
 
 `reconciliations.warnings` の Schema は **変更しない**（TEXT のまま、中身が
-JSON 配列で要素構造だけ拡張）。コード側で `parseWarnings` ヘルパで吸収する。
+JSON 配列で要素構造だけ拡張）。コード側で `services/parse-warnings.ts` の
+`parseWarnings()` ヘルパで読み出し時に互換吸収する (Codex CRITICAL #2)。
 
 ## Error Handling
 
 | 場面 | 種別 | 戦略 |
 |---|---|---|
-| Slack Webhook 4xx (URL 無効等) | エラー | リトライせず即 failed、notification_settings.last_error に記録 |
-| Slack Webhook 5xx / timeout | リトライ | exp backoff 1s/5s/30s、3 回失敗で failed |
-| PDF 生成中の R2 取得失敗 (フォント) | エラー | job を failed に倒し error_message にスタック記録 |
-| PDF 生成中の D1 タイムアウト | エラー | 同上、リカバリは手動再投入 |
+| Slack Webhook 4xx (URL 無効等) | エラー | リトライせず `notification_deliveries.status='failed'`、`last_error` に HTTP status + path 末尾のみ記録 (URL 本体は含めない) |
+| Slack Webhook 5xx / timeout | リトライ | exp backoff **1s/3s/8s = 12s 以内 (waitUntil 30s 制限内)**、3 回失敗時は `status='pending'` を維持して `next_retry_at` を +5 分後に設定、次回 cron で再試行 |
+| Slack notifier 累積 retry > 24h | エラー | `status='failed'` に倒し、`audit_logs.slack_notification_failed` を記録 |
+| PDF 生成中の R2 取得失敗 (フォント) | エラー | job を failed に倒し `error_message: "font not found in R2"` |
+| PDF 生成中の D1 タイムアウト | エラー | 同上、リカバリは手動再投入 (active_report_key 解放を確認) |
+| `report_jobs` が 30 分以上 `running` | リカバリ | 既存 `*/5` cron が `failed` に倒す (Phase 2 reconciliation_jobs と同パターン) |
+| `REPORT_QUEUE.send()` 失敗 | エラー | route で即 `failed` に倒し UNIQUE 制約を解放 |
 | Baseline 計算で 0 件 | スキップ | INSERT せず、log のみ |
+| `notification_deliveries.idempotency_key` 衝突 | 正常 | INSERT OR IGNORE で重複防止、`audit_logs.slack_notification_skipped` |
 
 ## Security Considerations
 
-- `notification_settings.slack_webhook_url` は **D1 に平文保存**するが、`/api`
-  経由でも値そのものは GET で返さない（マスク表示: `https://hooks.slack.com/services/T***/B***/***`）。
-  PUT で書き換え可能のみ。`audit_logs.payload` には URL を含めない
-- PDF 生成バイナリは R2 に置き、15 分有効の signed URL でしか配信しない
-- レポートに PII (ドライバー名) が含まれるため、ダウンロード URL はログに残さない
+- **Slack Webhook URL** (`notification_settings.slack_webhook_url`):
+  - D1 平文列で保存。Cloudflare D1 は AES-256-GCM の EAR を持つため
+    「DB ファイル盗難」には耐性あり。アプリ層暗号化は Phase 4 で再検討
+  - GET API はマスク表示 (`https://hooks.slack.com/services/T***/B***/***`)
+  - PUT のみで書き換え可、DELETE は対応しない (空文字に PUT で無効化)
+  - `audit_logs.payload` / `notification_deliveries.last_error` / Worker logs
+    のいずれにも URL 本体を含めない (`last_error` は HTTP status + path 末尾の
+    `/services/***/***/***` のみ)
+- **PDF 配信** (Codex Phase 3 review HIGH #14):
+  - Phase 1 payment-summary と統一: **Bearer 必須の authenticated proxy
+    download** (`GET /api/reports/jobs/:id/download` → Worker が R2 から取得し
+    bytes ストリーミング)
+  - R2 presigned URL は使わない (Phase 1 と方式統一、URL 漏洩リスク回避、
+    Cloudflare Access の認可レイヤーを通過させる)
+  - ダウンロード URL も Bearer 必須 (path だけ知られても 401)
+- レポートに PII (ドライバー名) が含まれるため、Worker logs に
+  `r2_key` (period + jobId 含む) を出さない
 - Slack 投稿時にメッセージ中に dispatch_records.task_name 等がそのまま出るが、
   これは想定運用（社内 Slack）。社外向け Slack の場合は別途マスキング検討
 
@@ -406,23 +521,42 @@ JSON 配列で要素構造だけ拡張）。コード側で `parseWarnings` ヘ�
 
 ### Unit Tests
 
-- `anomaly-detector.ts`: 4 warning タイプ × 境界ケース（baseline 有無 / time-only /
-  date 跨ぎ / 多重 warning）= 10+ ケース
-- `slack-notifier.ts`: モック fetch で正常 / 4xx / 5xx / retry 回数 = 6 ケース
-- `pdf-templates/*.ts`: snapshot test で生成された PDF の page 数 / フォント埋込確認
-- `pdf-generator.ts`: フォント取得失敗 / 巨大データ（500 行）
+- `anomaly-detector.ts`: 5 warning タイプ × 境界ケース = 12+ ケース
+  - fare_deviation: baseline 有無 / task vs driver_fallback / sd=0 / 閾値境界
+  - time_inversion: `start <= end` / overnight (`23:00 → 02:00`) /
+    inversion (`12:00 → 09:00`) / parse 失敗 / 720 分境界
+  - advance_payment_without_label vs without_dispatch の区別
+  - dispatch_overload: 2 件・3 件・4 件の境界
+  - legacy_warning 変換 (parse-warnings.ts と組み合わせ)
+- `parse-warnings.ts`: 旧 string[] / 新 StructuredWarning[] / null / 不正 JSON = 6 ケース
+- `slack-notifier.ts`: モック fetch で 200 / 429 / 500 / timeout / 4 attempt 内収束 = 6 ケース
+- **PDF テスト (Codex Phase 3 review MEDIUM #18 反映)**: snapshot ではなく構造検証:
+  - `pdf-lib.PDFDocument.load(bytes)` で読み戻して page count / 期待文字列が
+    text content に含まれるか
+  - フォント埋込確認 (embedFont が呼ばれて Glyph が含まれる)
+  - footer ページ番号、header テキスト
+  - 行数に応じたページ分割 (50 行 / 200 行 / 500 行)
+- `pdf-generator.ts`: フォント取得失敗 (R2 null) / `row count exceeds 500` で fail
+
+### Bench Tests (Codex Phase 3 review MEDIUM #17 反映)
+
+- `pdf-generator.bench.ts`: 100 行 / 200 行 / 500 行で CPU time / byte size /
+  page count を測定。target: 200 行 < 5s、500 行 < 30s
 
 ### Integration Tests
 
-- reconciliation job → anomaly-detector → warnings JSON 構造化保存
-- baseline job → anomaly_baselines INSERT
-- report job → R2 PUT → signed URL 取得
-- notification_settings: PUT → テスト投稿 fire / GET でマスク表示
+- reconciliation job → anomaly-detector → warnings JSON 構造化保存 (parseWarnings
+  で読み戻し可能)
+- baseline job → anomaly_baselines INSERT (partial unique index 動作確認)
+- report job → R2 PUT → Bearer 付き download で bytes 取得
+- notification_deliveries: INSERT → cron dispatcher → status='sent' / 'pending' retry
+- notification_settings: PUT → idempotency_key 生成 → GET でマスク表示
+- 同 period × type の report 二重投入で 409
 
 ### E2E Tests (wrangler dev)
 
 - 実 Slack webhook (テスト用 channel) に投稿される
-- 実 R2 に PDF が保存される + ダウンロード可能
+- 実 R2 に PDF が保存される + Bearer 付き download で取得
 
 ## Migration & Rollout
 
