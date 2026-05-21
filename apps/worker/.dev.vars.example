@@ -15,3 +15,9 @@ WORKER_URL=http://localhost:8787
 # 管理画面と STEELO API の許可 origin（カンマ区切り）。
 # Cloudflare Access 配下にあることを前提に、多層防御として origin も限定する。
 STEELO_WEB_ORIGINS=https://admin.example.com
+
+# STEELO Phase 2 用
+# Anthropic Claude Haiku 4.5 の API key。LINE 配車メッセージの LLM 解析に使用。
+# 未設定の場合、LLM 解析は無効化（dispatch_records は手動入力のみ）。
+# 取得元: https://console.anthropic.com/settings/keys
+ANTHROPIC_API_KEY=sk-ant-api03-dummy-for-local-dev
