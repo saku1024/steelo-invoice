@@ -258,7 +258,14 @@ export type AuditAction =
   | 'import_archive'
   | 'payment_generate'
   | 'payment_job_request'
-  | 'payment_batch_generate';
+  | 'payment_batch_generate'
+  // Phase 2 reconciliation
+  | 'llm_parse_request'
+  | 'llm_parse_reparse'
+  | 'reconciliation_run'
+  | 'reconciliation_review'
+  | 'dispatch_manual_match'
+  | 'dispatch_status_confirm';
 
 export interface AuditLog {
   id: string;

@@ -1,0 +1,24 @@
+{
+  "feature_name": "phase2-reconciliation",
+  "created_at": "2026-05-21T10:00:00+09:00",
+  "updated_at": "2026-05-21T10:30:00+09:00",
+  "language": "ja",
+  "phase": "implementation-ready",
+  "approvals": {
+    "requirements": {
+      "generated": true,
+      "approved": true
+    },
+    "design": {
+      "generated": true,
+      "approved": true
+    },
+    "tasks": {
+      "generated": true,
+      "approved": true
+    }
+  },
+  "ready_for_implementation": true,
+  "description": "STEELO Phase 2 — F2 LLM(Claude Haiku) で LINE 配車メッセージを dispatch_records に自動構造化し、F4 自動照合エンジンで client_records とマッチング（matched / client_only / dispatch_only）して、月初の照合作業を自動化する。Phase 1 で達成した『支払明細生成の半自動化』に対し、Phase 2 で本来のプロダクト価値である『稼働照合』を完成させる。",
+  "depends_on": ["phase1-mvp"]
+}

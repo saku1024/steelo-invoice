@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.97.1",
     "@line-crm/db": "workspace:*",
     "@line-crm/line-sdk": "workspace:*",
     "@line-crm/shared": "workspace:*",

@@ -4,6 +4,7 @@ import {
   insertLineMessageIgnoreDup,
 } from '@line-crm/db';
 import { recordSystemAudit } from './audit.js';
+import type { Env } from '../index.js';
 
 /**
  * STEELO Phase 1 — LINE グループメッセージハンドラ（F1）。
@@ -20,7 +21,8 @@ import { recordSystemAudit } from './audit.js';
  */
 export async function handleGroupMessage(
   db: D1Database,
-  event: WebhookEvent
+  event: WebhookEvent,
+  env?: Env['Bindings']
 ): Promise<void> {
   if (event.type !== 'message') return;
   if (event.source.type !== 'group') return;
@@ -43,7 +45,7 @@ export async function handleGroupMessage(
 
   try {
     const driver = await getDriverByLineGroupId(db, groupId);
-    await insertLineMessageIgnoreDup(db, {
+    const result = await insertLineMessageIgnoreDup(db, {
       groupId,
       driverId: driver?.id ?? null,
       senderUserId,
@@ -55,6 +57,15 @@ export async function handleGroupMessage(
       messageText,
       receivedAt,
     });
+    // Phase 2: 新規 INSERT されたテキストメッセージは LLM 解析キューへ
+    if (result.inserted && env?.LLM_PARSE_QUEUE && messageType === 'text') {
+      try {
+        await env.LLM_PARSE_QUEUE.send({ lineMessageId: result.id });
+      } catch (e) {
+        console.error('[group-message-handler] enqueue LLM parse failed:', e);
+        // 失敗してもメッセージ自体は保存できているので、Scheduled fallback で拾える
+      }
+    }
   } catch (err) {
     console.error('[group-message-handler] save failed:', err);
     try {

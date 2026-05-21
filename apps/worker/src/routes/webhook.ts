@@ -129,8 +129,9 @@ webhook.post('/webhook', async (c) => {
       try {
         // STEELO Phase 1 F1: グループメッセージは line_messages に蓄積し、
         // 既存の friend/scenario 系処理はスキップする（個別チャットと別フロー）
+        // STEELO Phase 2 F2: 同時に LLM 解析キューに enqueue する
         if (isGroupMessageEvent(event)) {
-          await handleGroupMessage(db, event);
+          await handleGroupMessage(db, event, c.env);
           continue;
         }
         await handleEvent(db, lineClient, event, channelAccessToken, matchedAccountId, c.env.WORKER_URL || new URL(c.req.url).origin, c.env.LIFF_URL, c.env.IMAGES);

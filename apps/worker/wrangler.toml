@@ -50,6 +50,28 @@ queue = "payment-job-queue"
 max_batch_size = 1
 max_concurrency = 1
 
+# STEELO Phase 2: LLM 解析ジョブ
+[[queues.producers]]
+binding = "LLM_PARSE_QUEUE"
+queue = "llm-parse-queue"
+
+[[queues.consumers]]
+queue = "llm-parse-queue"
+max_batch_size = 1
+max_concurrency = 3
+max_retries = 3
+
+# STEELO Phase 2: 月次照合ジョブ
+[[queues.producers]]
+binding = "RECONCILIATION_QUEUE"
+queue = "reconciliation-queue"
+
+[[queues.consumers]]
+queue = "reconciliation-queue"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 2
+
 [triggers]
 crons = ["*/5 * * * *", "0 */6 * * *"]
 
@@ -90,6 +112,26 @@ queue = "payment-job-queue"
 queue = "payment-job-queue"
 max_batch_size = 1
 max_concurrency = 1
+
+[[env.production.queues.producers]]
+binding = "LLM_PARSE_QUEUE"
+queue = "llm-parse-queue"
+
+[[env.production.queues.consumers]]
+queue = "llm-parse-queue"
+max_batch_size = 1
+max_concurrency = 3
+max_retries = 3
+
+[[env.production.queues.producers]]
+binding = "RECONCILIATION_QUEUE"
+queue = "reconciliation-queue"
+
+[[env.production.queues.consumers]]
+queue = "reconciliation-queue"
+max_batch_size = 1
+max_concurrency = 1
+max_retries = 2
 
 [env.production.triggers]
 crons = ["*/5 * * * *", "0 */6 * * *"]

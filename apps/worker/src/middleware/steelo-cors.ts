@@ -28,6 +28,9 @@ export const STEELO_PATH_PREFIXES = [
   '/api/payment-summaries',
   '/api/line-messages',
   '/api/audit-logs',
+  // Phase 2
+  '/api/reconciliations',
+  '/api/llm-parse',
 ] as const;
 
 export function isSteeloPath(pathname: string): boolean {

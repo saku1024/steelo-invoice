@@ -36,6 +36,9 @@ export * from './dispatch-records';
 export * from './import-batches';
 export * from './payment-summaries';
 export * from './audit-logs';
+// STEELO Phase 2
+export * from './llm-parse-results';
+export * from './reconciliations';
 // テスト用 SQLite アダプタは `./test-helpers/sqlite-d1` から直接 import する。
 // ここから re-export すると Worker バンドルに node:fs / better-sqlite3 が混入する
 

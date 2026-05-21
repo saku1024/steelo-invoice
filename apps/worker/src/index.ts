@@ -81,12 +81,20 @@ import excelImports from './routes/excel-imports.js';
 import paymentSummaries from './routes/payment-summaries.js';
 import paymentJobs from './routes/payment-jobs.js';
 import auditLogs from './routes/audit-logs.js';
+// STEELO Phase 2
+import reconciliationsRoute from './routes/reconciliations.js';
+import llmParseRoute from './routes/llm-parse.js';
 import { steeloCors, isSteeloPath } from './middleware/steelo-cors.js';
 import { runPaymentJob } from './services/payment-batch-job.js';
+import { handleLLMParseJob } from './services/llm-parser.js';
+import { runReconciliationJob } from './services/reconciliation-job.js';
 import {
   deleteExpiredImportPreviews,
   getQueuedPaymentJobs,
   recoverStuckPaymentJobs,
+  getQueuedReconciliationJobs,
+  recoverStuckReconciliationJobs,
+  listUnparsedLineMessageIds,
 } from '@line-crm/db';
 import { isLinkPreviewBot } from './lib/og-bot.js';
 import { buildOgHtml } from './lib/og-html.js';
@@ -117,6 +125,10 @@ export type Env = {
     STEELO_FILES?: R2Bucket;       // preview JSON + 生成済み xlsx/ZIP（任意：未バインドでも既存機能は動く）
     PAYMENT_JOB_QUEUE?: Queue;     // 一括支払明細ジョブキュー（未バインドなら Scheduled fallback）
     STEELO_WEB_ORIGINS?: string;   // STEELO 専用 CORS の許可 origin（カンマ区切り）
+    // STEELO Phase 2
+    ANTHROPIC_API_KEY?: string;    // Claude Haiku 用 API key（wrangler secret）
+    LLM_PARSE_QUEUE?: Queue;       // LINE メッセージ LLM 解析キュー
+    RECONCILIATION_QUEUE?: Queue;  // 月次照合ジョブキュー
   };
   Variables: {
     staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' };
@@ -207,6 +219,9 @@ app.route('/', excelImports);
 app.route('/', paymentJobs);
 app.route('/', paymentSummaries);
 app.route('/', auditLogs);
+// STEELO Phase 2
+app.route('/', reconciliationsRoute);
+app.route('/', llmParseRoute);
 
 // Self-hosted QR code proxy — prevents leaking ref tokens to third-party services
 app.get('/api/qr', async (c) => {
@@ -937,20 +952,69 @@ async function scheduled(
       console.error('[steelo] scheduled payment job fallback error:', e);
     }
   }
+
+  // STEELO Phase 2: 取り残された reconciliation_jobs を failed に倒す
+  try {
+    const recovered = await recoverStuckReconciliationJobs(env.DB, 30);
+    if (recovered > 0) {
+      console.log(`[steelo] recovered ${recovered} stuck reconciliation job(s)`);
+    }
+  } catch (e) {
+    console.error('[steelo] reconciliation recovery error:', e);
+  }
+
+  // STEELO Phase 2: RECONCILIATION_QUEUE 未バインド時の fallback
+  if (!env.RECONCILIATION_QUEUE) {
+    try {
+      const jobs = await getQueuedReconciliationJobs(env.DB, 3);
+      for (const j of jobs) {
+        await runReconciliationJob(env as Env['Bindings'], { jobId: j.id });
+      }
+    } catch (e) {
+      console.error('[steelo] reconciliation fallback error:', e);
+    }
+  }
+
+  // STEELO Phase 2: LLM_PARSE_QUEUE 未バインド時の fallback
+  // is_parsed=0 のメッセージを最大 20 件再投入（コスト保護のため少なめ）
+  if (!env.LLM_PARSE_QUEUE && env.ANTHROPIC_API_KEY) {
+    try {
+      const ids = await listUnparsedLineMessageIds(env.DB, 20);
+      for (const id of ids) {
+        try {
+          await handleLLMParseJob(env as Env['Bindings'], { lineMessageId: id });
+        } catch (e) {
+          console.error(`[steelo] llm-parse fallback error for ${id}:`, e);
+        }
+      }
+    } catch (e) {
+      console.error('[steelo] llm-parse fallback list error:', e);
+    }
+  }
 }
 
-// STEELO Phase 1: Queues consumer。`payment-job-queue` から jobId を受け取り、
-// `runPaymentJob` で 1 ジョブを処理する。1メッセージ = 1ジョブ（max_batch_size=1）。
+// STEELO Queues consumer。queue name で振り分け:
+//   - payment-job-queue (Phase 1): runPaymentJob
+//   - llm-parse-queue (Phase 2): handleLLMParseJob
+//   - reconciliation-queue (Phase 2): runReconciliationJob
 async function queue(
-  batch: MessageBatch<{ jobId: string }>,
+  batch: MessageBatch<Record<string, unknown>>,
   env: Env['Bindings']
 ): Promise<void> {
   for (const message of batch.messages) {
     try {
-      await runPaymentJob(env, message.body.jobId);
+      if (batch.queue === 'payment-job-queue') {
+        await runPaymentJob(env, (message.body as { jobId: string }).jobId);
+      } else if (batch.queue === 'llm-parse-queue') {
+        await handleLLMParseJob(env, message.body as { lineMessageId: string });
+      } else if (batch.queue === 'reconciliation-queue') {
+        await runReconciliationJob(env, message.body as { jobId: string });
+      } else {
+        console.warn(`[steelo] unknown queue: ${batch.queue}`);
+      }
       message.ack();
     } catch (e) {
-      console.error('[steelo] queue consumer error:', e);
+      console.error(`[steelo] queue ${batch.queue} consumer error:`, e);
       message.retry();
     }
   }
