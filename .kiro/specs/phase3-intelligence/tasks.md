@@ -156,10 +156,11 @@ Foundation → F8 → F9 → F10 → Validation の順、`(P)` で並列実行�
   (Codex round 1 CRITICAL #4 / round 2 補強 反映)
   - `sendSlackNotification()`: 各 fetch を `AbortController` で **5 秒 timeout**、
     retry sleep `1s → 3s → 8s` で **最悪累積 27 秒** (waitUntil 30s 制限内)
-  - **payload は event_payload_json + schema_version を取り出して Block Kit を
-    送信時に組み立てる** (Codex round 2 MEDIUM #7 反映、payload schema 変更耐性)
+  - **payload は `event_payload_json` + `payload_schema_ver` を取り出して
+    Block Kit を送信時に組み立てる** (Codex round 2 MEDIUM #7 / round 4 HIGH #1 反映、
+    payload schema 変更耐性)
   - `buildReconciliationCompletedBlocks()`, `buildMonthlyReminderBlocks()`,
-    `buildLLMFailureStreakBlocks()` は別関数 (schema_version=1 用)
+    `buildLLMFailureStreakBlocks()` は別関数 (`payload_schema_ver=1` 用)
   - URL は last_error に含めない (HTTP status + path 末尾 `/services/***/***/***`)
   - **Slack を呼んでよいのは slack-dispatcher と /api/notification-settings/test
     のみ** (Codex round 2 CRITICAL #1 境界)
@@ -323,10 +324,14 @@ P0 (reconciliation) で PDF 基盤の Workers 動作を確認、その後 P1 / P
     - D1 migration 048 適用
     - フォント R2 アップロード (NotoSansJP-Regular.ttf)
     - REPORT_QUEUE + report-dlq 作成
+    - 新規 cron triggers (`*/1 * * * *`, `0 0 1 * *`) を wrangler.toml に追加
     - Cloudflare Access に Phase 3 API パス追加 (/api/reports/*,
       /api/notification-settings/*, /api/anomaly-baselines/*)
     - Slack Incoming Webhook URL の取得 → 管理画面で投入手順
-  - 観測可能完了条件: deployment.md の Phase 3 セクションが完成
+  - **Codex round 4 LOW #2 反映**: 既存 deployment.md の冒頭リンク群に
+    `phase3-acceptance.md` も追加 (Phase 1/2 と同じく相互リンク)
+  - 観測可能完了条件: deployment.md の Phase 3 セクションが完成、
+    冒頭で phase1/2/3 acceptance のすべてに導線がある
   - _Requirements: 7.1_
 
 - [ ] 5.5 spec 再レビュー (推奨)

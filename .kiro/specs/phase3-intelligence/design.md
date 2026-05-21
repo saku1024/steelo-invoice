@@ -400,31 +400,48 @@ export function serializeWarnings(warnings: StructuredWarning[]): string | null;
 
 ### Service: slack-notifier.ts
 
+**Codex round 4 HIGH #1 反映**: notifier の入力は `notification_deliveries` 行
+そのものを取り、`payload_schema_ver` を見て送信時に Block Kit を組み立てる。
+事前組み立て済み Block Kit を受け取る形 (旧 `SlackBlockMessage`) は廃止。
+これで delivery row の payload 表現と notifier interface が一貫する。
+
 ```ts
 export type NotificationEvent =
   | 'reconciliation_completed'
-  | 'anomaly_detected'        // (内部用、reconciliation_completed に集約)
   | 'monthly_reminder'
   | 'llm_parse_failed_streak';
 
-export interface SlackBlockMessage {
-  text: string;       // fallback text
-  blocks: unknown[];  // Block Kit
+/** notification_deliveries 行から取り出した送信ジョブ */
+export interface DeliveryJob {
+  id: string;
+  idempotencyKey: string;
+  eventType: NotificationEvent;
+  payloadSchemaVer: number;
+  eventPayloadJson: string;  // イベント生データ (Slack 非依存)
+  attemptCount: number;
 }
 
+/**
+ * Slack Block Kit を送信時に組み立てて投稿する。
+ * 呼び出し可能なのは slack-dispatcher (cron */1) と
+ * /api/notification-settings/test の test エンドポイントのみ。
+ */
 export async function sendSlackNotification(
   env: Env['Bindings'],
-  event: NotificationEvent,
-  message: SlackBlockMessage
-): Promise<{ sent: boolean; error?: string }>;
+  job: DeliveryJob,
+): Promise<{ sent: boolean; httpStatus?: number; error?: string }>;
 
-export function buildReconciliationCompletedMessage(input: {
-  period: string;
-  summary: { matched: number; clientOnly: number; dispatchOnly: number };
-  warningCounts: Record<string, number>;
-  adminUrl: string;
-}): SlackBlockMessage;
+// 内部関数: payload_schema_ver=1 用の Block Kit 組立
+function buildBlocksV1(
+  eventType: NotificationEvent,
+  eventPayload: Record<string, unknown>,
+): { text: string; blocks: unknown[] };
 ```
+
+`buildBlocksV1` は `reconciliation_completed` / `monthly_reminder` /
+`llm_parse_failed_streak` の 3 種を分岐して Block Kit を返す純粋関数。
+将来 `payload_schema_ver=2` を導入する場合は `buildBlocksV2` を追加し、
+旧 v1 行も再送可能な状態を維持する。
 
 ### Service: pdf-templates/
 
