@@ -70,6 +70,7 @@ jobs:
             src/services/parse-warnings.test.ts \
             src/services/anomaly-detector.test.ts \
             src/services/line-notifier.test.ts \
+            src/services/notification-dispatcher.test.ts \
             src/services/pdf-generator.test.ts \
             src/phase3-integration.test.ts
 
