@@ -86,6 +86,7 @@ import reconciliationsRoute from './routes/reconciliations.js';
 import llmParseRoute from './routes/llm-parse.js';
 // STEELO Phase 3
 import anomalyBaselinesRoute from './routes/anomaly-baselines.js';
+import notificationSettingsRoute from './routes/notification-settings.js';
 import { steeloCors, isSteeloPath } from './middleware/steelo-cors.js';
 import { runPaymentJob } from './services/payment-batch-job.js';
 import { handleLLMParseJob } from './services/llm-parser.js';
@@ -133,6 +134,7 @@ export type Env = {
     RECONCILIATION_QUEUE?: Queue;  // 月次照合ジョブキュー
     // STEELO Phase 3
     REPORT_QUEUE?: Queue;          // 月次 PDF レポート生成ジョブキュー
+    // (LINE_CHANNEL_ACCESS_TOKEN は Phase 1 既存 declared、F9 でも流用)
   };
   Variables: {
     staff: { id: string; name: string; role: 'owner' | 'admin' | 'staff' };
@@ -228,6 +230,7 @@ app.route('/', reconciliationsRoute);
 app.route('/', llmParseRoute);
 // STEELO Phase 3
 app.route('/', anomalyBaselinesRoute);
+app.route('/', notificationSettingsRoute);
 
 // Self-hosted QR code proxy — prevents leaking ref tokens to third-party services
 app.get('/api/qr', async (c) => {
@@ -998,14 +1001,16 @@ async function scheduled(
     }
   }
 
-  // STEELO Phase 3: cron `0 0 1 * *` (JST 9:00 月初) で baseline 自動再計算
-  // Codex Phase 3 round 2 HIGH #6: event.cron で処理を分岐し、毎 cron で全部走らせない
+  // STEELO Phase 3: cron 別の処理分岐 (Codex Phase 3 round 2 HIGH #6)
+  // - `0 0 1 * *` (JST 9:00 月初): baseline recompute + monthly_reminder + 24h LLM streak 確認
+  // - `*/1 * * * *` (毎分): notification-dispatcher
+  // - `*/5 * * * *` (5 分粒度): LLM 連続失敗の頻繁チェック (cooldown は 24h)
   if (event.cron === '0 0 1 * *') {
+    // 月初: baseline recompute
     try {
       const { runAnomalyBaselineJob } = await import(
         './services/anomaly-baseline-job.js'
       );
-      // 当月の period (UTC で 1 日 0:00 = JST 9:00 月初)
       const now = new Date();
       const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
       const result = await runAnomalyBaselineJob(env.DB, { period });
@@ -1015,10 +1020,76 @@ async function scheduled(
     } catch (e) {
       console.error('[steelo] phase3 baseline recompute error:', e);
     }
+
+    // 月初: 前月 import_batch 未取込なら monthly_reminder enqueue
+    try {
+      const now = new Date();
+      // 前月の period (JST 月初に走るが、UTC で 1 日 0:00 なので now.getUTCMonth() は当月、-1 で前月)
+      const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+      const prevPeriod = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, '0')}`;
+      const batchRow = await env.DB
+        .prepare(
+          `SELECT id FROM import_batches WHERE period = ? AND status = 'confirmed' LIMIT 1`,
+        )
+        .bind(prevPeriod)
+        .first<{ id: string }>();
+      if (!batchRow) {
+        const { enqueueDelivery } = await import('@line-crm/db');
+        await enqueueDelivery(env.DB, {
+          idempotencyKey: `monthly_reminder:${prevPeriod}`,
+          eventType: 'monthly_reminder',
+          eventPayloadJson: JSON.stringify({ prevPeriod }),
+        });
+        console.log(`[steelo] phase3 monthly_reminder enqueued for ${prevPeriod}`);
+      }
+    } catch (e) {
+      console.error('[steelo] phase3 monthly_reminder enqueue error:', e);
+    }
   }
 
-  // Phase 3 F9 monthly_reminder / Phase 3 F9 slack-dispatcher (*/1) / Phase 3 F10
-  // report-job fallback は F9/F10 タスクで追加予定
+  // `*/1` cron: notification-dispatcher
+  if (event.cron === '*/1 * * * *') {
+    try {
+      const { runNotificationDispatcher } = await import(
+        './services/notification-dispatcher.js'
+      );
+      const r = await runNotificationDispatcher(env as Env['Bindings']);
+      if (r.claimed > 0 || r.recoveredStuck > 0) {
+        console.log(
+          `[notification-dispatcher] claimed=${r.claimed} sent=${r.sent} failed=${r.failed} requeued=${r.requeued} skipped=${r.skipped} recovered=${r.recoveredStuck}`,
+        );
+      }
+    } catch (e) {
+      console.error('[steelo] phase3 notification-dispatcher error:', e);
+    }
+  }
+
+  // `*/5` cron: LLM 連続失敗 streak 検知 (24h cooldown は isCooldownActive で判定)
+  if (event.cron === '*/5 * * * *') {
+    try {
+      const { isCooldownActive, enqueueDelivery } = await import('@line-crm/db');
+      const cooldown = await isCooldownActive(env.DB, 'llm_parse_failed_streak', 24);
+      if (!cooldown) {
+        // 直近 24h で `failed` が 5 件以上なら enqueue
+        const recent = await env.DB
+          .prepare(
+            `SELECT COUNT(*) AS n FROM llm_parse_results
+             WHERE status = 'failed' AND created_at >= datetime('now', '-1 day')`,
+          )
+          .first<{ n: number }>();
+        if ((recent?.n ?? 0) >= 5) {
+          await enqueueDelivery(env.DB, {
+            idempotencyKey: `llm_failed_streak:${new Date().toISOString().slice(0, 13)}`,
+            eventType: 'llm_parse_failed_streak',
+            eventPayloadJson: JSON.stringify({ count: recent?.n ?? 0 }),
+          });
+          console.log(`[steelo] phase3 llm_parse_failed_streak enqueued (count=${recent?.n})`);
+        }
+      }
+    } catch (e) {
+      console.error('[steelo] phase3 llm streak detection error:', e);
+    }
+  }
 }
 
 // STEELO Queues consumer。queue name で振り分け:

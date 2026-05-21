@@ -73,11 +73,12 @@ export function createSqliteD1(schemaSqlPath?: string): SqliteD1 {
   if (schemaSqlPath) {
     raw.exec(readFileSync(schemaSqlPath, 'utf8'));
   } else {
-    // STEELO Phase 1 + Phase 2 のテストで両方使えるよう、関連 migration を順に適用
+    // STEELO Phase 1 + 2 + 3 のテストで使えるよう、関連 migration を順に適用
     const migrationsDir = resolve(__dirname, '..', '..', 'migrations');
     const orderedMigrations = [
       '046_steelo_phase1.sql',
       '047_phase2_reconciliation.sql',
+      '048_phase3_intelligence.sql',
     ];
     for (const name of orderedMigrations) {
       try {

@@ -9,6 +9,7 @@ import {
   getDispatchesForPeriod,
   getClientRecordsForReconcilePeriod,
   listAllBaselines,
+  enqueueDelivery,
 } from '@line-crm/db';
 import {
   buildBaselineMap,
@@ -108,6 +109,37 @@ export async function runReconciliationJob(
       });
     } catch (e) {
       console.error('[reconciliation-job] audit failed:', e);
+    }
+
+    // Phase 3 F9 反映: 通知 enqueue のみ (Slack 直接呼出禁止、Codex round 2 CRITICAL #5)
+    // - 実送信は cron `*/1` の notification-dispatcher が拾う
+    // - idempotency_key = reconciliation_completed:{jobId} で 1 job 1 通知保証
+    // - warnings の severity=warn を type 別に集計し、payload に含める
+    try {
+      const warningCounts: Record<string, number> = {};
+      for (const row of rows) {
+        for (const w of row.warnings) {
+          if (w.severity === 'warn') {
+            warningCounts[w.type] = (warningCounts[w.type] ?? 0) + 1;
+          }
+        }
+      }
+      const adminUrl = `${env.STEELO_WEB_ORIGINS?.split(',')[0]?.trim() ?? ''}/reconciliations?period=${job.period}`;
+      await enqueueDelivery(env.DB, {
+        idempotencyKey: `reconciliation_completed:${jobId}`,
+        eventType: 'reconciliation_completed',
+        eventPayloadJson: JSON.stringify({
+          period: job.period,
+          matched: summary.matched,
+          clientOnly: summary.clientOnly,
+          dispatchOnly: summary.dispatchOnly,
+          warningCounts,
+          adminUrl,
+        }),
+      });
+    } catch (e) {
+      // 通知 enqueue 失敗は job 本体の成功を阻害しない (fire-and-forget)
+      console.error('[reconciliation-job] notification enqueue failed:', e);
     }
   } catch (e) {
     console.error(`[reconciliation-job] ${jobId} failed:`, e);
