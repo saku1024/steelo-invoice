@@ -149,6 +149,21 @@ export function getPromptBundle(version: number = CURRENT_PROMPT_VERSION): Promp
 }
 
 /**
+ * system prompt の SHA-256 ハッシュ短縮版（先頭 12 文字）を返す。
+ * llm_parse_results.input_json に保存して、プロンプト改変の検証に使う
+ * （Codex Phase 2 review MEDIUM #15 反映）。
+ */
+export async function computeSystemPromptHash(version: number = CURRENT_PROMPT_VERSION): Promise<string> {
+  const bundle = getPromptBundle(version);
+  const data = new TextEncoder().encode(bundle.systemPrompt);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  const bytes = new Uint8Array(hash);
+  return Array.from(bytes.slice(0, 6))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
  * 解析対象メッセージから user prompt を組み立てる。driverHint があれば
  * 文脈として埋める（system プロンプト側には PII を入れない）。
  */

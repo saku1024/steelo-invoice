@@ -9,6 +9,7 @@
 //   3. 最良スコアでマッチを決め、残った dispatch を dispatch_only、
 //      残った client を client_only として記録
 import type { MatchMethod, MatchStatus } from '@line-crm/shared';
+import { buildCalendarDate } from './date-validation.js';
 
 export interface DispatchLike {
   id: string;
@@ -269,9 +270,8 @@ function parseTimeToMinutes(t: string): number | null {
 }
 
 function clientDateString(period: string, workDay: number): string | null {
-  if (!/^\d{4}-\d{2}$/.test(period)) return null;
-  if (!Number.isInteger(workDay) || workDay < 1 || workDay > 31) return null;
-  return `${period}-${String(workDay).padStart(2, '0')}`;
+  // Codex Phase 2 review MEDIUM #13: 2026-02-31 のような実在しない日付を弾く
+  return buildCalendarDate(period, workDay);
 }
 
 function computeFareMedianByDriver(records: ClientLike[]): Map<string, number> {
@@ -292,6 +292,14 @@ function computeFareMedianByDriver(records: ClientLike[]): Map<string, number> {
   return med;
 }
 
+/**
+ * Codex Phase 2 review MEDIUM #17 反映:
+ * 仕様の「dispatch メモがあるのに client.advance_payment=0」は DispatchLike に
+ * notes 列が無いため Phase 2 では実装しない。Phase 3 で DispatchLike を拡張して
+ * 対応する。Phase 2 では確実に検出できる以下のみ:
+ *   - fare_deviation: client.fare が同 driver の中央値から閾値以上乖離
+ *   - advance_payment_without_dispatch: 立替金があるが dispatch にマッチしない
+ */
 function collectWarnings(
   cr: ClientLike,
   matchedDispatch: DispatchLike | undefined,
@@ -313,7 +321,7 @@ function collectWarnings(
     }
   }
 
-  // 立替金あるが時刻ない etc.
+  // 立替金あるが dispatch にマッチしない
   if (cr.advance_payment > 0 && matchedDispatch === undefined) {
     warnings.push('advance_payment_without_dispatch');
   }

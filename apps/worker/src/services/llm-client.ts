@@ -14,6 +14,7 @@ import {
   estimateCostUsd,
   getPromptBundle,
 } from './llm-prompts.js';
+import { isCalendarValidDate, isCalendarValidTime } from './date-validation.js';
 
 export interface LLMParseRequest {
   text: string;
@@ -239,16 +240,15 @@ function nullableInt(v: unknown): number | null {
   return null;
 }
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function validateDate(v: unknown): string | null {
-  return typeof v === 'string' && DATE_RE.test(v) ? v : null;
+  // Codex Phase 2 review MEDIUM #13: 2026-02-31 のようなカレンダー無効値を弾く
+  return typeof v === 'string' && isCalendarValidDate(v) ? v : null;
 }
 
-const TIME_RE = /^\d{1,2}:\d{2}(?::\d{2})?$/;
 function validateTime(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const t = v.trim();
-  return TIME_RE.test(t) ? t : null;
+  return isCalendarValidTime(t) ? t : null;
 }
 
 /** Factory: Workers 環境で Anthropic クライアントを作る */

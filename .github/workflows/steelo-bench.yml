@@ -56,12 +56,14 @@ jobs:
           pnpm exec vitest run \
             src/services/audit.test.ts \
             src/services/validation.test.ts \
+            src/services/date-validation.test.ts \
             src/middleware/steelo-cors.test.ts \
             src/services/group-message-handler.test.ts \
             src/services/payment-calculator.test.ts \
             src/services/excel-import.test.ts \
             src/services/excel-export.test.ts \
             src/services/reconciliation.test.ts \
+            src/services/reconciliation.bench.ts \
             src/services/llm-client.test.ts \
             src/steelo-integration.test.ts \
             src/phase2-integration.test.ts

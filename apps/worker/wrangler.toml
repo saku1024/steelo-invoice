@@ -51,6 +51,8 @@ max_batch_size = 1
 max_concurrency = 1
 
 # STEELO Phase 2: LLM 解析ジョブ
+# 失敗時の再配信は retry_delay 30s 起点で 3 回、それ以降は DLQ に送る
+# (Codex Phase 2 review HIGH #4 反映)
 [[queues.producers]]
 binding = "LLM_PARSE_QUEUE"
 queue = "llm-parse-queue"
@@ -60,6 +62,12 @@ queue = "llm-parse-queue"
 max_batch_size = 1
 max_concurrency = 3
 max_retries = 3
+retry_delay = 30
+dead_letter_queue = "llm-parse-dlq"
+
+[[queues.producers]]
+binding = "LLM_PARSE_DLQ"
+queue = "llm-parse-dlq"
 
 # STEELO Phase 2: 月次照合ジョブ
 [[queues.producers]]
@@ -71,6 +79,12 @@ queue = "reconciliation-queue"
 max_batch_size = 1
 max_concurrency = 1
 max_retries = 2
+retry_delay = 60
+dead_letter_queue = "reconciliation-dlq"
+
+[[queues.producers]]
+binding = "RECONCILIATION_DLQ"
+queue = "reconciliation-dlq"
 
 [triggers]
 crons = ["*/5 * * * *", "0 */6 * * *"]
@@ -122,6 +136,12 @@ queue = "llm-parse-queue"
 max_batch_size = 1
 max_concurrency = 3
 max_retries = 3
+retry_delay = 30
+dead_letter_queue = "llm-parse-dlq"
+
+[[env.production.queues.producers]]
+binding = "LLM_PARSE_DLQ"
+queue = "llm-parse-dlq"
 
 [[env.production.queues.producers]]
 binding = "RECONCILIATION_QUEUE"
@@ -132,6 +152,12 @@ queue = "reconciliation-queue"
 max_batch_size = 1
 max_concurrency = 1
 max_retries = 2
+retry_delay = 60
+dead_letter_queue = "reconciliation-dlq"
+
+[[env.production.queues.producers]]
+binding = "RECONCILIATION_DLQ"
+queue = "reconciliation-dlq"
 
 [env.production.triggers]
 crons = ["*/5 * * * *", "0 */6 * * *"]

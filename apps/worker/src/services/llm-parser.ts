@@ -24,6 +24,7 @@ import {
 import {
   CURRENT_PROMPT_VERSION,
   MODEL_NAME,
+  computeSystemPromptHash,
 } from './llm-prompts.js';
 import {
   parseDispatchMessage,
@@ -165,10 +166,15 @@ export async function handleLLMParseJob(
   }
 
   // 結果保存（input は再解析できる程度に保持: prompt version + driver hint 等）
+  // Codex Phase 2 review MEDIUM #15: systemPromptHash も保存して、後から
+  // 「同じプロンプトで再解析できるか」を判定可能にする
+  const systemPromptHash = await computeSystemPromptHash(resp.promptVersion);
   const inputSnapshot = JSON.stringify({
     text: message.message_text.slice(0, 4000),
     receivedAt: message.received_at,
     promptVersion: resp.promptVersion,
+    modelName: resp.modelName,
+    systemPromptHash,
     driverHint: driverHint ? { id: driverHint.id, name: driverHint.name } : null,
   });
   await upsertLLMParseResult(env.DB, {
