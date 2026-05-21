@@ -12,6 +12,7 @@ import {
   MODEL_NAME,
   buildUserPrompt,
   estimateCostUsd,
+  getOutputSchema,
   getPromptBundle,
 } from './llm-prompts.js';
 import { isCalendarValidDate, isCalendarValidTime } from './date-validation.js';
@@ -78,24 +79,41 @@ export async function parseDispatchMessage(
     req.receivedAt
   );
 
-  let resp;
-  try {
-    resp = await client.messages.create(
+  // claude-api スキル指摘 #B 反映:
+  //   output_config.format に json_schema を渡すことで、Anthropic 側が JSON 構造を
+  //   保証する。プロンプト依存の「JSON のみ出力せよ」指示は不要になり、
+  //   INVALID_JSON / SCHEMA_MISMATCH エラーが激減する。Haiku 4.5 は対応モデル。
+  //
+  // claude-api スキル指摘 #A について:
+  //   Haiku 4.5 の cache 最小サイズ 4096 tokens に対して system プロンプトは ~1300
+  //   tokens のため cache_control は今は silent no-op。プロンプトを今後拡張する
+  //   余地のために marker は残してある。
+  // output_config は @anthropic-ai/sdk の型に直接定義が無い場合があるので、
+  // 明示的に Message 型として戻りを受ける。
+  const createParams = {
+    model: bundle.modelName,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    system: [
       {
-        model: bundle.modelName,
-        max_tokens: MAX_OUTPUT_TOKENS,
-        system: [
-          {
-            type: 'text',
-            text: bundle.systemPrompt,
-            // prompt caching: 同じ system プロンプトを 5 分キャッシュ
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-        messages: [{ role: 'user', content: userPrompt }],
+        type: 'text' as const,
+        text: bundle.systemPrompt,
+        cache_control: { type: 'ephemeral' as const },
       },
+    ],
+    messages: [{ role: 'user' as const, content: userPrompt }],
+    output_config: {
+      format: {
+        type: 'json_schema',
+        schema: getOutputSchema(version),
+      },
+    },
+  };
+  let resp: Anthropic.Message;
+  try {
+    resp = (await client.messages.create(
+      createParams as unknown as Parameters<typeof client.messages.create>[0],
       { timeout: REQUEST_TIMEOUT_MS }
-    );
+    )) as Anthropic.Message;
   } catch (e) {
     throw mapAnthropicError(e);
   }

@@ -14,18 +14,24 @@
 export const CURRENT_PROMPT_VERSION = 1;
 
 /**
- * Claude Haiku 4.5 (2025-10-01). 旧 claude-3-haiku-20240307 は 2026-04-20 に
- * Anthropic が retired したため使えない（Codex Phase 2 review CRITICAL #1）。
+ * Claude Haiku 4.5 — エイリアスを使用（Anthropic スキルガイドの推奨）。
+ * 旧 claude-3-haiku-20240307 は 2026-04-20 に retired したため使えない。
+ * Anthropic は date-stamped ID への append を推奨しないため、エイリアス固定。
  */
-export const MODEL_NAME = 'claude-haiku-4-5-20251001';
+export const MODEL_NAME = 'claude-haiku-4-5';
 
 /**
  * 概算コスト（Claude Haiku 4.5 価格、2026 時点）:
  *   input: $1.00 / 1M tokens、output: $5.00 / 1M tokens
- *   prompt cache read は $0.10 / 1M tokens（90% off）
- *   月 1,000 件 × 平均 500 input + 200 output tokens
- *   = 500,000 input + 200,000 output → $0.50 + $1.00 = $1.50
- *   ≒ ¥225（prompt cache 50% 適用で ¥150 程度）
+ *
+ * 月 1,000 件 × 平均 600 input + 200 output tokens
+ *   = 600,000 input + 200,000 output → $0.60 + $1.00 = $1.60
+ *   ≒ ¥240
+ *
+ * 注: prompt cache は **Haiku 4.5 では system プロンプトが 4096 tokens 未満**
+ * のため silent no-op になる（claude-api スキル指摘 #A）。
+ * cache_control は今後プロンプトを拡張した時のために残してある。
+ * 4096 tokens 超を保証したい場合は few-shot 例を増やすこと。
  */
 export const PRICE_INPUT_PER_M_TOKENS_USD = 1.0;
 export const PRICE_OUTPUT_PER_M_TOKENS_USD = 5.0;
@@ -54,9 +60,13 @@ export interface PromptBundle {
   jsonSchemaHint: string;
 }
 
+// claude-api スキル指摘 #B 反映:
+//   structured outputs (output_config.format + json_schema) を使うようになったため、
+//   プロンプトから「JSON のみ出力」「フォーマット例」を削除し、判定ロジックの
+//   説明に絞り込んだ。フォーマット保証は API レイヤー側 (schema) が行う。
 const SYSTEM_PROMPT_V1 = `あなたは運送業 STEELO の配車管理アシスタントです。
 LINE グループに流れたテキストメッセージを受け取り、それが「配車案内」かどうかを判定し、
-配車案内の場合は構造化された案件情報を JSON で返してください。
+配車案内の場合は構造化された案件情報を返してください。
 
 # 配車案内の典型パターン
 
@@ -80,7 +90,7 @@ LINE グループに流れたテキストメッセージを受け取り、それ
 \`\`\`
 
 ただし定型ではないバリエーションも多いので、業務名・時刻・場所の文脈で判断してください。
-「配車案内」以外のもの（完了報告、雑談、画像共有等）は \`isDispatch: false\` を返してください。
+「配車案内」以外のもの（完了報告、雑談、画像共有等）は isDispatch=false を返してください。
 
 # 抽出するフィールド
 
@@ -95,45 +105,70 @@ LINE グループに流れたテキストメッセージを受け取り、それ
 - endTime: 終了時刻 "HH:MM"（範囲があれば末尾）
 - managementNumber: 動態管理番号
 
-# 出力フォーマット（厳密に守る）
+# confidence ルール
 
-\`\`\`json
-{
-  "isDispatch": true | false,
-  "confidence": "high" | "medium" | "low",
-  "records": [
-    {
-      "driverName": "田中太郎" | null,
-      "workDate": "2026-05-21" | null,
-      "taskNumber": 1 | null,
-      "taskName": "築地チャーター" | null,
-      "pickupLocation": "東京" | null,
-      "deliveryLocation": "築地" | null,
-      "startTime": "06:00" | null,
-      "endTime": "08:00" | null,
-      "managementNumber": "BD-12345" | null
-    }
-  ],
-  "reasoning": "判定の根拠を 1-2 文で"
+- 全ての案件で業務名・時刻ともに取れていれば "high"
+- 業務名と時刻のどちらかが欠落している案件があれば "low"
+- 上記の中間（一部完全、一部 partial）は "medium"
+
+# 出力
+
+isDispatch=false のときは records は [] にする。`;
+
+// claude-api スキル指摘 #B 反映:
+//   Anthropic structured outputs に渡す JSON Schema。Haiku 4.5 は対応モデル。
+//   strict: additionalProperties=false が要求されるので各オブジェクトで明示する。
+//   minimum/maximum/minLength/maxLength は未サポートなので使わない。
+//   recursive schema も未サポートなので flat な型のみ。
+const OUTPUT_SCHEMA_V1 = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['isDispatch', 'confidence', 'records'],
+  properties: {
+    isDispatch: { type: 'boolean' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    records: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'driverName',
+          'workDate',
+          'taskNumber',
+          'taskName',
+          'pickupLocation',
+          'deliveryLocation',
+          'startTime',
+          'endTime',
+          'managementNumber',
+        ],
+        properties: {
+          driverName: { type: ['string', 'null'] },
+          workDate: { type: ['string', 'null'] },
+          taskNumber: { type: ['integer', 'null'] },
+          taskName: { type: ['string', 'null'] },
+          pickupLocation: { type: ['string', 'null'] },
+          deliveryLocation: { type: ['string', 'null'] },
+          startTime: { type: ['string', 'null'] },
+          endTime: { type: ['string', 'null'] },
+          managementNumber: { type: ['string', 'null'] },
+        },
+      },
+    },
+    reasoning: { type: 'string' },
+  },
+} as const;
+
+export type OutputSchema = typeof OUTPUT_SCHEMA_V1;
+
+export function getOutputSchema(version: number = CURRENT_PROMPT_VERSION): unknown {
+  if (version === 1) return OUTPUT_SCHEMA_V1;
+  throw new Error(`unknown prompt version: ${version}`);
 }
-\`\`\`
 
-- isDispatch=false のときは records は [] にする。
-- 業務名と時刻のどちらかが取れていない案件は confidence="low" にする。
-- 全ての案件が完全に取れていれば "high"。
-
-JSON 以外の文字を出力しないでください（markdown フェンスやコメント、前置きも禁止）。`;
-
-const JSON_SCHEMA_HINT_V1 = `{
-  "type": "object",
-  "required": ["isDispatch", "confidence", "records"],
-  "properties": {
-    "isDispatch": {"type": "boolean"},
-    "confidence": {"enum": ["high", "medium", "low"]},
-    "records": {"type": "array", "items": {"type": "object"}},
-    "reasoning": {"type": "string"}
-  }
-}`;
+/** @deprecated structured outputs を使うため未使用。互換のため残す。 */
+const JSON_SCHEMA_HINT_V1 = JSON.stringify(OUTPUT_SCHEMA_V1);
 
 /** バージョン番号からプロンプトを取得する。version は履歴のキー */
 export function getPromptBundle(version: number = CURRENT_PROMPT_VERSION): PromptBundle {
@@ -166,6 +201,8 @@ export async function computeSystemPromptHash(version: number = CURRENT_PROMPT_V
 /**
  * 解析対象メッセージから user prompt を組み立てる。driverHint があれば
  * 文脈として埋める（system プロンプト側には PII を入れない）。
+ * 出力フォーマットは output_config.format で API が保証するので、
+ * プロンプトでの強制は不要 (claude-api スキル指摘 #B)。
  */
 export function buildUserPrompt(
   messageText: string,
@@ -179,7 +216,5 @@ export function buildUserPrompt(
 [受信日時] ${receivedAt}${hint}
 
 [本文]
-${messageText}
-
-JSON 形式で出力してください（マークダウンや前置きなし）。`;
+${messageText}`;
 }
