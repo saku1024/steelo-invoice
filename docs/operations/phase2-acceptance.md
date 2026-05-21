@@ -1,8 +1,11 @@
 # Phase 2 (Reconciliation) 手動受入チェックリスト
 
 Phase 2 (F2 LLM 解析 + F4 自動照合) を本番投入する前の手動チェック。
-Phase 1 のチェック (`docs/operations/phase1-acceptance.md`) を踏破済みの
+Phase 1 のチェック ([`phase1-acceptance.md`](./phase1-acceptance.md)) を踏破済みの
 前提で追加項目を行う。
+
+> **デプロイ手順そのもの** は [`deployment.md`](./deployment.md) を参照。
+> 本ドキュメントは「動作確認シナリオ」を扱う。
 
 ## 0. 事前準備
 
