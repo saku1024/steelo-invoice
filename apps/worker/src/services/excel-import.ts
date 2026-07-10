@@ -33,7 +33,8 @@ export class ExcelValidationError extends Error {
       | 'EXTERNAL_LINK_NOT_ALLOWED'
       | 'OLE_NOT_ALLOWED'
       | 'PARSE_ERROR'
-      | 'HEADER_MISSING',
+      | 'HEADER_MISSING'
+      | 'RATE_INVALID',
     message: string,
     public details?: Record<string, unknown>
   ) {
@@ -228,8 +229,39 @@ export function parseExcel(buffer: ArrayBuffer): ParsedExcel {
   const warnings: string[] = [];
   const header = extractHeader(aoa, warnings);
   const rows = extractRows(aoa, warnings);
+  checkHeaderRowTotals(header, rows, warnings);
 
   return { header, rows, warnings };
+}
+
+/**
+ * ヘッダーの合計値（運賃合計・立替合計）と明細行の実際の合計を突合する。
+ * 列マッピングがずれている（例: テンプレート改版で列順が変わった）場合、
+ * 明細は一見パースできてしまうため、金額ベースの突合でしか検知できない。
+ * 不一致は import 自体は止めず preview の warnings に載せ、確定前に
+ * スタッフが目視確認できるようにする。
+ */
+function checkHeaderRowTotals(
+  header: ParsedHeader,
+  rows: ParsedRow[],
+  warnings: string[]
+): void {
+  if (rows.length === 0) return;
+  const TOLERANCE_YEN = 1;
+  const rowFareSum = rows.reduce((s, r) => s + (r.fare ?? 0), 0);
+  const rowAdvanceSum = rows.reduce((s, r) => s + r.advancePayment, 0);
+  if (Math.abs(rowFareSum - header.totalFare) > TOLERANCE_YEN) {
+    warnings.push(
+      `totalFare mismatch: header=${header.totalFare}, sum of rows=${rowFareSum} ` +
+        `(diff=${rowFareSum - header.totalFare}); column mapping may be shifted`
+    );
+  }
+  if (Math.abs(rowAdvanceSum - header.totalAdvance) > TOLERANCE_YEN) {
+    warnings.push(
+      `totalAdvance mismatch: header=${header.totalAdvance}, sum of rows=${rowAdvanceSum} ` +
+        `(diff=${rowAdvanceSum - header.totalAdvance}); column mapping may be shifted`
+    );
+  }
 }
 
 // =============================================================================
@@ -318,8 +350,8 @@ function extractHeader(aoa: unknown[][], warnings: string[]): ParsedHeader {
     headerVehicleCost: numOrZero(found.headerVehicleCost, 'headerVehicleCost', warnings),
     headerProcessingFee: numOrZero(found.headerProcessingFee, 'headerProcessingFee', warnings),
     headerPrepayment: numOrZero(found.headerPrepayment, 'headerPrepayment', warnings),
-    commissionRate: parseRate(found.commissionRate, 0.075),
-    taxRate: parseRate(found.taxRate, 0.1),
+    commissionRate: parseRate(found.commissionRate, '手数料率'),
+    taxRate: parseRate(found.taxRate, '消費税率'),
     templateVersion,
   };
 }
@@ -327,9 +359,15 @@ function extractHeader(aoa: unknown[][], warnings: string[]): ParsedHeader {
 /**
  * 率（手数料率・税率）を正規化する。Codex impl review MEDIUM #13 反映:
  *   - 0.075 / 7.5 / "7.5%" / "0.075" / "7.5 %" 等を 0〜1 の小数に変換
- *   - 範囲外（負・1以上）はデフォルトにフォールバック
+ *
+ * 以前はラベル未検出・パース失敗・範囲外の場合に無言でデフォルト値
+ * （手数料率 7.5% / 税率 10%）へフォールバックしていたが、これだと
+ * BOND 側のテンプレート改版でラベルの文字列や位置が変わった場合に
+ * 気づかないまま全ドライバーの支払額を誤った率で計算してしまう。
+ * そのため以降は検出・解釈できない場合はインポートを失敗させ、
+ * 人間による確認を必須にする。
  */
-function parseRate(v: unknown, fallback: number): number {
+function parseRate(v: unknown, fieldName: string): number {
   let n: number | null = null;
   if (typeof v === 'number') n = v;
   else if (typeof v === 'string') {
@@ -338,10 +376,22 @@ function parseRate(v: unknown, fallback: number): number {
     const num = Number(trimmed.replace('%', ''));
     if (!Number.isNaN(num)) n = isPercent ? num / 100 : num;
   }
-  if (n === null || Number.isNaN(n)) return fallback;
+  if (n === null || Number.isNaN(n)) {
+    throw new ExcelValidationError(
+      'RATE_INVALID',
+      `${fieldName} not found or unparseable in header; refusing to default silently`,
+      { field: fieldName, rawValue: v }
+    );
+  }
   // 1 以上は百分率表記とみなす（7.5 → 0.075）
   if (n >= 1 && n < 100) return n / 100;
-  if (n < 0 || n >= 1) return fallback;
+  if (n < 0 || n >= 1) {
+    throw new ExcelValidationError(
+      'RATE_INVALID',
+      `${fieldName} out of expected range (0-100%): ${n}`,
+      { field: fieldName, rawValue: v }
+    );
+  }
   return n;
 }
 

@@ -125,7 +125,7 @@ export async function insertReconciliations(
   let inserted = 0;
   for (let i = 0; i < rows.length; i += BATCH) {
     const chunk = rows.slice(i, i + BATCH);
-    const stmts = chunk.map(buildInsertStatement.bind(null, db));
+    const stmts = chunk.map((r) => buildInsertStatement(db, r));
     await db.batch(stmts);
     inserted += chunk.length;
   }
@@ -134,14 +134,15 @@ export async function insertReconciliations(
 
 function buildInsertStatement(
   db: D1Database,
-  r: InsertReconciliationInput
+  r: InsertReconciliationInput,
+  status: 'active' | 'pending' = 'active'
 ): D1PreparedStatement {
   return db
     .prepare(
       `INSERT INTO reconciliations
        (id, period, reconciliation_job_id, dispatch_id, client_record_id,
         match_status, match_method, match_score, warnings, status, reviewed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
     )
     .bind(
       crypto.randomUUID(),
@@ -152,53 +153,63 @@ function buildInsertStatement(
       r.matchStatus,
       r.matchMethod,
       r.matchScore,
-      r.warningsJson
+      r.warningsJson,
+      status
     );
 }
 
 /**
- * 月次照合結果を「旧 active → archived」 + 「新 active 全件 INSERT」 を
- * **D1 batch() の同一トランザクション内**で実行する原子的確定処理。
+ * 月次照合結果を確定する。以前の実装は「旧 active → archived」の batch と
+ * 「新 active を INSERT」の batch が別トランザクションになっており、
+ * 第1バッチ後・第2バッチ前に Worker が中断すると period が一時的に
+ * active 0 件になりうる非原子的な処理だった（Codex Phase2 review CRITICAL #3
+ * で「原子的」と称していたが実際には保証されていなかった）。
  *
- * D1 はステートメント数の上限を考慮して 1 バッチあたり 60 ステートメントに収める
- * （archive 2 + insert 最大 58）。これを越える場合は 2 段階に分けて、
- * 旧 archived は最初の batch、新 active は次の batch で完了させる。
- * D1 batch 内は自動的に transaction で wrap される。
+ * 修正後は2段階に分ける:
+ *   1. 新しい行を status='pending' として INSERT する。pending は
+ *      listReconciliations 等どのクエリからも明示指定でしか見えないため、
+ *      ここで何件失敗しても旧 active には一切影響しない
+ *      （import-batch の pending→confirmed と同じ「不可視ステージング」パターン）。
+ *   2. 「旧 active → archived」+「新 pending → active」の切替を
+ *      **単一の db.batch()（=単一トランザクション）** で行う。
+ *      ステートメント数は常に 3 件で行数に依存しないため D1 のバッチ
+ *      ステートメント数上限に触れることがなく、真に原子的。
  */
 export async function commitReconciliationsAtomic(
   db: D1Database,
   period: string,
   rows: InsertReconciliationInput[]
 ): Promise<{ archived: number; archivedReviewed: number; inserted: number }> {
-  const { stmts: archiveStmts, toArchive, toReview } = await buildArchiveStatements(
-    db,
-    period
-  );
-  // 第 1 バッチ: archive 2 件のみ
-  await db.batch(archiveStmts);
-  // 第 2 バッチ以降: 新 active を 50 件ずつ
+  // 前回失敗時に取り残された pending 行があれば掃除してから開始する
+  await db
+    .prepare(`DELETE FROM reconciliations WHERE period = ? AND status = 'pending'`)
+    .bind(period)
+    .run();
+
+  // 段階1: 新しい行を非公開の pending として INSERT
   let inserted = 0;
   if (rows.length > 0) {
     const BATCH = 50;
     for (let i = 0; i < rows.length; i += BATCH) {
       const chunk = rows.slice(i, i + BATCH);
-      const stmts = chunk.map((r) => buildInsertStatement(db, r));
-      try {
-        await db.batch(stmts);
-        inserted += chunk.length;
-      } catch (e) {
-        // 中途失敗時の補償: ここまで insert した active を archived_failed として残す
-        await db
-          .prepare(
-            `UPDATE reconciliations SET status = 'archived'
-             WHERE period = ? AND status = 'active'`
-          )
-          .bind(period)
-          .run();
-        throw e;
-      }
+      const stmts = chunk.map((r) => buildInsertStatement(db, r, 'pending'));
+      await db.batch(stmts);
+      inserted += chunk.length;
     }
   }
+
+  // 段階2: archive + pending→active の切替を単一トランザクションで実行
+  const { stmts: archiveStmts, toArchive, toReview } = await buildArchiveStatements(
+    db,
+    period
+  );
+  await db.batch([
+    ...archiveStmts,
+    db
+      .prepare(`UPDATE reconciliations SET status = 'active' WHERE period = ? AND status = 'pending'`)
+      .bind(period),
+  ]);
+
   return { archived: toArchive, archivedReviewed: toReview, inserted };
 }
 

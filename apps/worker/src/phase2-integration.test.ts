@@ -591,6 +591,63 @@ describe('Integration: Codex Phase 2 review CRITICAL fixes', () => {
     const archived = await listReconciliations(h.db, { period: '2026-05', status: 'archived' });
     expect(archived.total).toBe(1);
   });
+
+  it('CRITICAL #3 再修正: 前回中断で残った pending 行は次回コミット時に掃除され、新 active に紛れ込まない', async () => {
+    const job1 = await createReconciliationJob(h.db, { period: '2026-06', requestedBy: 's' });
+    await commitReconciliationsAtomic(h.db, '2026-06', [
+      {
+        period: '2026-06',
+        reconciliationJobId: job1.id,
+        dispatchId: null,
+        clientRecordId: null,
+        matchStatus: 'dispatch_only',
+        matchMethod: 'none',
+        matchScore: 0,
+        warningsJson: null,
+      },
+    ]);
+
+    // Worker が INSERT フェーズと切替フェーズの間で中断したケースを再現:
+    // pending のまま取り残された行を直接投入しておく
+    await h.db
+      .prepare(
+        `INSERT INTO reconciliations
+         (id, period, reconciliation_job_id, dispatch_id, client_record_id,
+          match_status, match_method, match_score, warnings, status, reviewed)
+         VALUES (?, '2026-06', ?, NULL, NULL, 'client_only', 'none', 0, NULL, 'pending', 0)`
+      )
+      .bind(crypto.randomUUID(), job1.id)
+      .run();
+
+    await h.db
+      .prepare(`UPDATE reconciliation_jobs SET status='completed' WHERE id=?`)
+      .bind(job1.id)
+      .run();
+    const job2 = await createReconciliationJob(h.db, { period: '2026-06', requestedBy: 's' });
+    await commitReconciliationsAtomic(h.db, '2026-06', [
+      {
+        period: '2026-06',
+        reconciliationJobId: job2.id,
+        dispatchId: null,
+        clientRecordId: null,
+        matchStatus: 'matched',
+        matchMethod: 'strong',
+        matchScore: 1,
+        warningsJson: null,
+      },
+    ]);
+
+    // 取り残された pending 行が新しい active に紛れ込んでいない
+    const active = await listReconciliations(h.db, { period: '2026-06', status: 'active' });
+    expect(active.total).toBe(1);
+    expect(active.items[0].match_status).toBe('matched');
+    const stray = await h.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM reconciliations WHERE period='2026-06' AND status='pending'`
+      )
+      .first<{ n: number }>();
+    expect(stray!.n).toBe(0);
+  });
 });
 
 describe('Integration: Codex Phase 2 review HIGH fixes', () => {

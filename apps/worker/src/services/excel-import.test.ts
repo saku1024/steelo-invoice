@@ -98,6 +98,49 @@ describe('parseExcel - ヘッダー', () => {
     const buf = makeXlsx({ Sheet1: aoa });
     expectErrCode(() => parseExcel(buf), 'HEADER_MISSING');
   });
+
+  it('手数料率ラベルが見つからない → 無言でデフォルトにせず RATE_INVALID', () => {
+    const aoa = makeBondLikeRows([]);
+    aoa[8] = ['不明なラベル', 0.075, null, null, null]; // 手数料率の行を書き換える
+    const buf = makeXlsx({ Sheet1: aoa });
+    expectErrCode(() => parseExcel(buf), 'RATE_INVALID');
+  });
+
+  it('税率が範囲外(100%以上) → RATE_INVALID', () => {
+    const aoa = makeBondLikeRows([]);
+    aoa[9] = ['消費税率', 150, null, null, null];
+    const buf = makeXlsx({ Sheet1: aoa });
+    expectErrCode(() => parseExcel(buf), 'RATE_INVALID');
+  });
+});
+
+describe('parseExcel - ヘッダー/明細の合計突合', () => {
+  it('運賃合計と明細行合計が一致する場合は warnings に出ない', () => {
+    const detail: unknown[][] = [
+      [1, '木', '築地チャーター', '東京', '築地', '06:00', '08:00', 15, 2000, 98000, '田中太郎', null],
+      [2, '金', '定期便', '横浜', '川崎', '09:00', '12:00', 20, 3000, 2000, '佐藤次郎', null],
+    ];
+    const buf = makeXlsx({ Sheet1: makeBondLikeRows(detail) });
+    const parsed = parseExcel(buf);
+    expect(parsed.warnings.some((w) => w.includes('totalFare mismatch'))).toBe(false);
+    expect(parsed.warnings.some((w) => w.includes('totalAdvance mismatch'))).toBe(false);
+  });
+
+  it('運賃合計が明細行合計とズレている（列マッピング崩れ想定）→ warning', () => {
+    const detail: unknown[][] = [
+      [1, '木', '築地チャーター', '東京', '築地', '06:00', '08:00', 15, 0, 7680, '田中太郎', null],
+    ];
+    // ヘッダーの運賃合計(100000) と明細合計(7680) が大きくズレている
+    const buf = makeXlsx({ Sheet1: makeBondLikeRows(detail) });
+    const parsed = parseExcel(buf);
+    expect(parsed.warnings.some((w) => w.includes('totalFare mismatch'))).toBe(true);
+  });
+
+  it('明細行が 0 件の場合は突合しない（ヘッダー抽出のみのテストを壊さない）', () => {
+    const buf = makeXlsx({ Sheet1: makeBondLikeRows([]) });
+    const parsed = parseExcel(buf);
+    expect(parsed.warnings.some((w) => w.includes('mismatch'))).toBe(false);
+  });
 });
 
 describe('parseExcel - 明細行', () => {
