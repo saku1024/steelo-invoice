@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "vite build && wrangler deploy",
+    "deploy:production": "vite build && wrangler deploy --env production",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
