@@ -42,6 +42,10 @@ function makeStatement(db: Database.Database, sql: string) {
 
 function makeBound(stmt: Database.Statement, args: unknown[]) {
   return {
+    // batch() 専用: better-sqlite3 のトランザクション内から同期的に呼ぶための内部フック。
+    // これが無いと batch() は各 statement を逐次 await するだけになり、途中失敗時に
+    // 本物の D1 のような全ロールバックを再現できない（Codex/Sol レビュー指摘）。
+    __rawRun: () => stmt.run(...args),
     first: async <T = Row>(): Promise<T | null> => {
       const row = stmt.get(...args);
       return (row as T) ?? null;
@@ -97,8 +101,10 @@ export function createSqliteD1(schemaSqlPath?: string): SqliteD1 {
       const factory = makeStatement(raw, sql);
       return {
         bind: (...args: unknown[]) => makeBound(raw.prepare(sql), args),
-        // 一部の呼び出しは bind を介さず直接 first/all/run を呼ぶことがあるため
-        // フォールバックとして空引数で動くようにしておく
+        // 一部の呼び出しは bind を介さず直接 first/all/run/batch() を呼ぶことがある
+        // ため（プレースホルダ無しの statement 等）、フォールバックとして
+        // 空引数で動くようにしておく。__rawRun も同様に batch() から使われる。
+        __rawRun: () => raw.prepare(sql).run(),
         first: async <T = Row>() => factory([]).first<T>(),
         all: async <T = Row>() => factory([]).all<T>(),
         run: async () => factory([]).run(),
@@ -109,11 +115,18 @@ export function createSqliteD1(schemaSqlPath?: string): SqliteD1 {
       return { count: 0, duration: 0 };
     },
     batch: async (statements: D1PreparedStatement[]) => {
-      const results = [];
-      for (const s of statements) {
-        results.push(await (s as unknown as { run: () => Promise<unknown> }).run());
-      }
-      return results as unknown as D1Result[];
+      // 本物の D1 batch() と同じ「単一トランザクション内で全成功/全失敗」を
+      // better-sqlite3 のネイティブ transaction で再現する。途中の statement が
+      // throw すれば、それ以前に実行した statement も含めて自動的に ROLLBACK される。
+      const runners = statements as unknown as Array<{
+        __rawRun: () => { changes: number; lastInsertRowid: number | bigint };
+      }>;
+      const txn = raw.transaction(() => runners.map((s) => s.__rawRun()));
+      const infos = txn();
+      return infos.map((info) => ({
+        success: true,
+        meta: { changes: info.changes, last_row_id: info.lastInsertRowid },
+      })) as unknown as D1Result[];
     },
     dump: async () => new ArrayBuffer(0),
   } as unknown as D1Database;

@@ -246,7 +246,19 @@ function checkHeaderRowTotals(
   rows: ParsedRow[],
   warnings: string[]
 ): void {
-  if (rows.length === 0) return;
+  if (rows.length === 0) {
+    // Codex/Sol レビュー指摘: 明細ヘッダー行が見つからない等で行が 1 件も
+    // 抽出できなかった場合、以前は突合自体をスキップしていたため、ヘッダーの
+    // 合計が非ゼロ（＝本来は明細があるはず）でも警告無しで confirm できてしまった。
+    if (header.totalFare !== 0 || header.totalAdvance !== 0) {
+      warnings.push(
+        `no detail rows were extracted but header totals are non-zero ` +
+          `(totalFare=${header.totalFare}, totalAdvance=${header.totalAdvance}); ` +
+          `check detail header row / column mapping before confirming`
+      );
+    }
+    return;
+  }
   const TOLERANCE_YEN = 1;
   const rowFareSum = rows.reduce((s, r) => s + (r.fare ?? 0), 0);
   const rowAdvanceSum = rows.reduce((s, r) => s + r.advancePayment, 0);
@@ -373,8 +385,15 @@ function parseRate(v: unknown, fieldName: string): number {
   else if (typeof v === 'string') {
     const trimmed = v.trim().replace(/\s/g, '');
     const isPercent = trimmed.endsWith('%');
-    const num = Number(trimmed.replace('%', ''));
-    if (!Number.isNaN(num)) n = isPercent ? num / 100 : num;
+    const numPart = trimmed.replace('%', '');
+    // Codex/Sol レビュー指摘: numPart が空文字だと Number('') === 0 という JS の
+    // 仕様により「空白のみ」「%だけ」のセルが無言で 0% として通ってしまう。
+    // 0% はデフォルト値(7.5%/10%)より悪い結果（全額支払い扱い等）になりうるため、
+    // 空文字は明示的に無効値として扱う。
+    if (numPart !== '') {
+      const num = Number(numPart);
+      if (!Number.isNaN(num)) n = isPercent ? num / 100 : num;
+    }
   }
   if (n === null || Number.isNaN(n)) {
     throw new ExcelValidationError(

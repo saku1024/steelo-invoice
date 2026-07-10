@@ -203,12 +203,23 @@ export async function commitReconciliationsAtomic(
     db,
     period
   );
-  await db.batch([
-    ...archiveStmts,
-    db
-      .prepare(`UPDATE reconciliations SET status = 'active' WHERE period = ? AND status = 'pending'`)
-      .bind(period),
-  ]);
+  // Codex/Sol レビュー指摘: 昇格対象を period だけで絞ると、
+  // reconciliation_jobs.active_period_key の UNIQUE 制約（同一 period の
+  // queued/running ジョブは 1 件のみ）という外部の不変条件に安全性を依存する
+  // ことになる。rows が持つ reconciliation_job_id でも絞り込み、この関数単体
+  // でも意図しない行を昇格させない防御を追加する。
+  const jobId = rows[0]?.reconciliationJobId;
+  const promoteStmt = jobId
+    ? db
+        .prepare(
+          `UPDATE reconciliations SET status = 'active'
+           WHERE period = ? AND reconciliation_job_id = ? AND status = 'pending'`
+        )
+        .bind(period, jobId)
+    : db
+        .prepare(`UPDATE reconciliations SET status = 'active' WHERE period = ? AND status = 'pending'`)
+        .bind(period);
+  await db.batch([...archiveStmts, promoteStmt]);
 
   return { archived: toArchive, archivedReviewed: toReview, inserted };
 }

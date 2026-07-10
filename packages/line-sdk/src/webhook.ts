@@ -36,7 +36,21 @@ export async function verifySignature(
   }
   const computedBase64 = btoa(binary);
 
-  // Constant-time comparison is not strictly needed here because both strings
-  // are base64 of the same length, but we avoid early-exit for safety.
-  return computedBase64 === signature;
+  return timingSafeEqual(computedBase64, signature);
+}
+
+/**
+ * Constant-time string comparison. A plain `===` short-circuits on the first
+ * mismatching character, which leaks timing information about how many
+ * leading bytes of the signature were guessed correctly. Length is compared
+ * up front (this alone doesn't leak the HMAC content), then every character
+ * is compared regardless of earlier mismatches (Codex/Sol review finding).
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }

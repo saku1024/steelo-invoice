@@ -112,6 +112,20 @@ describe('parseExcel - ヘッダー', () => {
     const buf = makeXlsx({ Sheet1: aoa });
     expectErrCode(() => parseExcel(buf), 'RATE_INVALID');
   });
+
+  it('手数料率セルが空白のみ → Number("")===0 に逃げず RATE_INVALID (Codex/Sol指摘)', () => {
+    const aoa = makeBondLikeRows([]);
+    aoa[8] = ['手数料率（既定 0.075）', '   ', null, null, null];
+    const buf = makeXlsx({ Sheet1: aoa });
+    expectErrCode(() => parseExcel(buf), 'RATE_INVALID');
+  });
+
+  it('消費税率セルが "%" のみ → RATE_INVALID (Codex/Sol指摘)', () => {
+    const aoa = makeBondLikeRows([]);
+    aoa[9] = ['消費税率', '%', null, null, null];
+    const buf = makeXlsx({ Sheet1: aoa });
+    expectErrCode(() => parseExcel(buf), 'RATE_INVALID');
+  });
 });
 
 describe('parseExcel - ヘッダー/明細の合計突合', () => {
@@ -136,10 +150,21 @@ describe('parseExcel - ヘッダー/明細の合計突合', () => {
     expect(parsed.warnings.some((w) => w.includes('totalFare mismatch'))).toBe(true);
   });
 
-  it('明細行が 0 件の場合は突合しない（ヘッダー抽出のみのテストを壊さない）', () => {
-    const buf = makeXlsx({ Sheet1: makeBondLikeRows([]) });
+  it('明細行が 0 件でヘッダー合計も 0 なら警告なし（ヘッダー抽出のみのテストを壊さない）', () => {
+    const aoa = makeBondLikeRows([]);
+    aoa[3] = ['運賃合計（税抜）', 0, null, null, null];
+    aoa[4] = ['立替合計', 0, null, null, null];
+    const buf = makeXlsx({ Sheet1: aoa });
     const parsed = parseExcel(buf);
     expect(parsed.warnings.some((w) => w.includes('mismatch'))).toBe(false);
+    expect(parsed.warnings.some((w) => w.includes('non-zero'))).toBe(false);
+  });
+
+  it('明細行が 0 件なのにヘッダー合計が非ゼロ → 警告 (Codex/Sol指摘: 以前は無警告で素通りしていた)', () => {
+    // makeBondLikeRows([]) は運賃合計100000・立替合計5000のまま明細行が無い状態
+    const buf = makeXlsx({ Sheet1: makeBondLikeRows([]) });
+    const parsed = parseExcel(buf);
+    expect(parsed.warnings.some((w) => w.includes('no detail rows were extracted'))).toBe(true);
   });
 });
 
